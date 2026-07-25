@@ -1914,13 +1914,24 @@ def build_default_agent_prompt(user) -> str:
         bits.append(sex_ru)
     who = name + (f" ({', '.join(bits)})" if bits else "")
 
+    # Медпрофиль приклеивается к промпту отдельным блоком (_health_profile_block).
+    # Если он непустой — не утверждаем обратное строкой ниже (#340): агент верил
+    # базовой фразе и советовал как здоровому, игнорируя блок с диагнозами.
+    history_line = (
+        "Подробной истории обследований в системе может не быть, но медицинский "
+        "профиль пациента есть — он в блоке «Медпрофиль» ниже, учитывай его. "
+        "Помогай освоиться и подсказывай, как пользоваться ботом, когда уместно.\n\n"
+        if _has_health_profile(user)
+        else "Это пользователь без подробной медицинской истории в системе — помогай "
+        "освоиться и подсказывай, как пользоваться ботом, когда уместно.\n\n"
+    )
+
     base = (
         f"Ты — личный AI-агент по теме здоровья для пользователя {name}. "
         "Часть проекта Botkin (botkin.health), канал Telegram @Botkin_md_bot.\n\n"
         "## Пользователь\n\n"
         f"**{who}.** Цель: {goal}.\n"
-        "Это пользователь без подробной медицинской истории в системе — помогай "
-        "освоиться и подсказывай, как пользоваться ботом, когда уместно.\n\n"
+        f"{history_line}"
         "## Что ты умеешь и как пользователь это делает\n\n"
         "- **Логирование еды** — пользователь пишет «съел банан и кофе», шлёт фото "
         "тарелки или голосовое; ты распознаёшь и считаешь калории/БЖУ. На вопрос "
@@ -1956,25 +1967,53 @@ def build_default_agent_prompt(user) -> str:
     return base + tone_block
 
 
-def _health_profile_block(user) -> str:
-    """Живой блок медпрофиля (аллергии/диагнозы из onboarding_data) для промпта.
+# users.smoking_status → человекочитаемо для промпта (#340). Курение спрашивает
+# онбординг (шаг 8, нужен для PhenoAge), но до агента оно раньше не доходило:
+# видели только дашборд и /user_profile.
+SMOKING_RU: dict[str, str] = {
+    "never": "не курит",
+    "former": "бросил",
+    "current": "курит",
+    "occasional": "курит изредка",
+}
 
-    Пусто по обоим ключам → пустая строка (не шумим). Читает те же ключи,
-    куда пишет merge_onboarding_lists, поэтому агент видит свежие данные сразу
-    после /doc-сохранения (промпт пересобирается на каждый вызов ask_agent).
+
+def _has_health_profile(user) -> bool:
+    """Есть ли у пользователя аллергии или хронические диагнозы в профиле.
+
+    Курение сюда НЕ входит: оно есть почти у каждого (обязательный шаг
+    онбординга) и само по себе медицинской историей не является.
+    """
+    from core.health.onboarding_lists import ALLERGY_KEYS, CONDITION_KEYS, onboarding_list
+
+    data = getattr(user, "onboarding_data", None) or {}
+    return bool(onboarding_list(data, ALLERGY_KEYS) or onboarding_list(data, CONDITION_KEYS))
+
+
+def _health_profile_block(user) -> str:
+    """Живой блок медпрофиля (аллергии/диагнозы/курение) для промпта.
+
+    Пусто по всем источникам → пустая строка (не шумим). Аллергии и диагнозы
+    читаются из тех же ключей ``onboarding_data``, куда пишет
+    merge_onboarding_lists, поэтому агент видит свежие данные сразу после
+    /doc-сохранения (промпт пересобирается на каждый вызов ask_agent).
+    Курение — из ``users.smoking_status``.
     """
     from core.health.onboarding_lists import ALLERGY_KEYS, CONDITION_KEYS, onboarding_list
 
     data = getattr(user, "onboarding_data", None) or {}
     allergies = onboarding_list(data, ALLERGY_KEYS)
     conditions = onboarding_list(data, CONDITION_KEYS)
-    if not allergies and not conditions:
+    smoking = SMOKING_RU.get(getattr(user, "smoking_status", None) or "")
+    if not allergies and not conditions and not smoking:
         return ""
     lines = ["\n\n## Медпрофиль (со слов пациента / из документов)"]
     if allergies:
         lines.append(f"Аллергии: {', '.join(allergies)}")
     if conditions:
         lines.append(f"Хронические диагнозы: {', '.join(conditions)}")
+    if smoking:
+        lines.append(f"Курение: {smoking}")
     lines.append("Учитывай при советах (лекарства, продукты, триггеры).")
     return "\n".join(lines)
 
