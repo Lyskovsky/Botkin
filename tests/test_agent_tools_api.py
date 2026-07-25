@@ -1109,6 +1109,49 @@ def test_meal_context_splits_freetext_conditions(client, no_kb):
     assert body["constraints_source"] == "onboarding"
 
 
+# ── /save_health_profile: мягкий сбор медпрофиля (#340) ───────────────────────
+
+
+def test_save_health_profile_writes_and_sets_flag(client, db_session):
+    """Диагнозы и аллергии со слов пациента ложатся в onboarding_data + флаг."""
+    r = client.post(
+        "/api/agent/save_health_profile",
+        json={"chronic_conditions": ["Гипотиреоз, принимаю Эутирокс 50 мкг"], "allergies": ["пыльца"]},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == "ok"
+    assert body["added"] == {"allergies": 1, "chronic_conditions": 1}
+    assert body["health_profile_asked"] is True
+
+    row = db_session.query(User).filter_by(telegram_id=895655).first()
+    assert row.onboarding_data["chronic_conditions"] == ["Гипотиреоз, принимаю Эутирокс 50 мкг"]
+    assert row.onboarding_data["allergies"] == ["пыльца"]
+    assert row.onboarding_data["health_profile_asked"] is True
+
+
+def test_save_health_profile_deduplicates(client, db_session):
+    """Повторная запись того же пункта не плодит дубли (case-insensitive)."""
+    client.post("/api/agent/save_health_profile", json={"chronic_conditions": ["Астма"]})
+
+    body = client.post("/api/agent/save_health_profile", json={"chronic_conditions": ["астма"]}).json()
+
+    assert body["added"] == {"allergies": 0, "chronic_conditions": 0}
+    row = db_session.query(User).filter_by(telegram_id=895655).first()
+    assert row.onboarding_data["chronic_conditions"] == ["Астма"]
+
+
+def test_save_health_profile_nothing_to_report(client, db_session):
+    """«Нечего сообщить» ничего не пишет в списки, но помечает вопрос заданным."""
+    body = client.post("/api/agent/save_health_profile", json={"nothing_to_report": True}).json()
+
+    assert body["status"] == "ok"
+    assert body["added"] == {}
+    row = db_session.query(User).filter_by(telegram_id=895655).first()
+    assert row.onboarding_data["health_profile_asked"] is True
+    assert "chronic_conditions" not in row.onboarding_data
+
+
 def _current_mock_user(client):
     """Достать mock-юзера, которым подменён get_agent_user в фикстуре client."""
     from webhook.jwt_auth import get_agent_user

@@ -1,5 +1,5 @@
 from types import SimpleNamespace
-from core.agent_chat import _health_profile_block
+from core.agent_chat import _health_profile_ask_block, _health_profile_block
 
 
 def test_block_empty_when_no_profile():
@@ -50,3 +50,30 @@ def test_block_ignores_unknown_smoking_value():
     """Мусорное/пустое значение smoking_status не порождает пустую строку."""
     assert _health_profile_block(SimpleNamespace(onboarding_data={}, smoking_status="")) == ""
     assert _health_profile_block(SimpleNamespace(onboarding_data={}, smoking_status="wat")) == ""
+
+
+# ── Мягкий сбор медпрофиля: инструкция спросить один раз (#340) ───────────────
+
+
+def test_ask_block_present_when_profile_empty():
+    """Профиль пуст, вопрос не задавали → агент получает инструкцию спросить."""
+    block = _health_profile_ask_block(SimpleNamespace(onboarding_data={"name": "Тест"}))
+    assert "save_health_profile" in block
+    assert "ОДИН раз" in block
+
+
+def test_ask_block_absent_when_profile_filled():
+    """Диагнозы уже есть → спрашивать нечего."""
+    user = SimpleNamespace(onboarding_data={"chronic_conditions": ["Гипотиреоз"]})
+    assert _health_profile_ask_block(user) == ""
+
+
+def test_ask_block_absent_when_already_asked():
+    """Вопрос уже задавали (nothing_to_report) → не повторяем."""
+    user = SimpleNamespace(onboarding_data={"health_profile_asked": True})
+    assert _health_profile_ask_block(user) == ""
+
+
+def test_ask_block_survives_missing_onboarding_data():
+    """None вместо dict не роняет сборку промпта."""
+    assert "save_health_profile" in _health_profile_ask_block(SimpleNamespace(onboarding_data=None))

@@ -486,6 +486,36 @@ TOOLS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "save_health_profile",
+        "description": (
+            "Сохранить медпрофиль СО СЛОВ пользователя: хронические диагнозы/состояния "
+            "и/или аллергии. Зови когда пользователь сам упомянул диагноз, хроническую "
+            "болячку, постоянное лекарство или аллергию — или когда ответил на твой "
+            "вопрос про это. Записывай короткими пунктами как сказал человек "
+            "(«Гипотиреоз, принимаю Эутирокс 50 мкг»), НЕ переформулируй в диагнозы, "
+            "которых он не называл. Дубли отсекаются автоматически. Если у пользователя "
+            "ничего нет или он не хочет отвечать — вызови с nothing_to_report=true: "
+            "это пометит, что вопрос задан, и больше спрашивать не нужно. НЕ придумывай "
+            "содержимое сам и НЕ переноси сюда диагнозы из документов или KB — документы "
+            "попадают в профиль своим путём (/doc)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "chronic_conditions": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Хронические диагнозы/состояния и постоянные лекарства, как назвал пользователь",
+                },
+                "allergies": {"type": "array", "items": {"type": "string"}},
+                "nothing_to_report": {
+                    "type": "boolean",
+                    "description": "true — пользователю нечего сообщить или он не хочет отвечать",
+                },
+            },
+        },
+    },
+    {
         "name": "update_user_settings",
         "description": (
             "Изменить настройки в user_settings table: target_weight_kg + target_weight_date "
@@ -1055,6 +1085,13 @@ def _call_tool(name: str, args: dict, token: str) -> str:
         elif name == "update_profile_questionnaire":
             r = requests.post(
                 f"{TOOLS_API_BASE}/update_profile_questionnaire",
+                json=args,
+                headers=headers,
+                timeout=15,
+            )
+        elif name == "save_health_profile":
+            r = requests.post(
+                f"{TOOLS_API_BASE}/save_health_profile",
                 json=args,
                 headers=headers,
                 timeout=15,
@@ -1887,6 +1924,7 @@ _TOOL_PROGRESS_LABEL = {
     "log_bp": "✍️ записываю давление",
     "regenerate_health_token": "🔑 пересоздаю токен",
     "update_profile_questionnaire": "📝 обновляю анкету",
+    "save_health_profile": "📝 записываю медпрофиль",
     "update_user_settings": "⚙️ обновляю настройки",
     # Render tools
     "render_report": "🎨 рисую график",
@@ -2019,6 +2057,32 @@ def _health_profile_block(user) -> str:
         lines.append(f"Курение: {smoking}")
     lines.append("Учитывай при советах (лекарства, продукты, триггеры).")
     return "\n".join(lines)
+
+
+def _health_profile_ask_block(user) -> str:
+    """Мягкий сбор медпрофиля: инструкция спросить ОДИН раз (#340).
+
+    Онбординг-квиз про хроники и постоянные лекарства не спрашивает (шаг убран
+    в f366c98 ради короткого квиза), а у самозарегистрированного юзера нет ни
+    KB, ни документов — медконтекста нет вообще. Поэтому просим агента добрать
+    это в диалоге, но ровно один раз: после ответа он зовёт save_health_profile,
+    который ставит ``health_profile_asked``.
+
+    Пустая строка, если профиль уже есть или вопрос уже задавали.
+    """
+    data = getattr(user, "onboarding_data", None) or {}
+    if data.get("health_profile_asked") or _has_health_profile(user):
+        return ""
+    return (
+        "\n\n## Медпрофиль ещё не собран\n"
+        "Про хронические болячки и постоянные лекарства пользователя мы не знаем — "
+        "онбординг об этом не спрашивает. Спроси ОДИН раз, мягко и к месту (когда "
+        "разговор и так про здоровье, самочувствие, еду или анализы). Не начинай с "
+        "этого диалог, не повторяй вопрос в каждом ответе и не превращай его в анкету. "
+        "Что услышал — сохрани через save_health_profile. Если человеку нечего "
+        "сообщить или он не хочет отвечать — вызови save_health_profile с "
+        "nothing_to_report=true и больше не спрашивай."
+    )
 
 
 # Admin-контекст-блок системного промпта (#337). Admin-статус (BOTKIN_ADMIN_IDS) —
@@ -2649,6 +2713,7 @@ def ask_agent(
             + UNIVERSAL_META_PROMPT
             + per_user_prompt
             + _health_profile_block(user)
+            + _health_profile_ask_block(user)
             + build_admin_context(_is_admin(user_id))
         )
         # Tracker-события (вес/еда/АД из парсеров) меняются КАЖДОЕ сообщение —
