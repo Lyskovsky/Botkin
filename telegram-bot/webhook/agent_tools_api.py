@@ -1439,10 +1439,14 @@ async def meal_context(
     db: Session = Depends(get_db),
 ):
     """P-002: всё нужное для «что мне съесть сейчас» ОДНИМ вызовом —
-    остаток КБЖУ на сегодня + ограничения (диагнозы) + любимые продукты.
+    остаток КБЖУ на сегодня + ограничения (диагнозы) + аллергии + любимые продукты.
 
     Зачем тул, а не три вызова: гарантирует, что ограничения-диагнозы (подагра,
     демпинг-синдром и т.п.) ВСЕГДА в контексте, и экономит токены/реплики.
+
+    Источники ограничений по приоритету: KB-файл юзера → `users.onboarding_data`
+    (#340; у самозарегистрированного юзера KB нет вовсе). Фактический источник —
+    в поле `constraints_source` ∈ {kb, onboarding, none}.
     """
     import json
 
@@ -1467,6 +1471,7 @@ async def meal_context(
 
     # Ограничения из KB (диагнозы) — чтобы советы были безопасны под состояние.
     constraints = []
+    constraints_source = "none"
     kb_path, _src = _resolve_user_kb_path(user)
     if kb_path:
         try:
@@ -1475,9 +1480,23 @@ async def meal_context(
                 v = kb.get(key)
                 if v:
                     constraints = v if isinstance(v, list) else [v]
+                    constraints_source = "kb"
                     break
         except Exception:
             logger.exception("meal_context: KB read failed")
+
+    # #340: у самозарегистрированного юзера KB-файла нет вовсе — диагнозы лежат
+    # в users.onboarding_data (пишет /doc через merge_onboarding_lists). Без этого
+    # fallback тул отдавал constraints=[] и советы шли как здоровому.
+    # Аллергии для «что съесть» критичнее диагнозов — отдаём отдельным полем.
+    from core.health.onboarding_lists import ALLERGY_KEYS, CONDITION_KEYS, onboarding_list
+
+    onboarding = user.onboarding_data or {}
+    if not constraints:
+        constraints = onboarding_list(onboarding, CONDITION_KEYS)
+        if constraints:
+            constraints_source = "onboarding"
+    allergies = onboarding_list(onboarding, ALLERGY_KEYS)
 
     return {
         "status": "ok",
@@ -1495,6 +1514,8 @@ async def meal_context(
             "fiber": totals.get("fiber"),
         },
         "constraints": constraints,
+        "constraints_source": constraints_source,
+        "allergies": allergies,
         "frequent_products": products[:15],
     }
 
