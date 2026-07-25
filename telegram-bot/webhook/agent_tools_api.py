@@ -968,6 +968,11 @@ async def list_kb_keys(user=Depends(get_agent_user)):
     Для каждого ключа отдаём type (list/dict/scalar) и count (длина для
     list/dict), чтобы агент понимал где искать. Служебные ключи `_*`
     и крупные дампы (`apple_health`, `cgm_data`) фильтруются.
+
+    Секция `documents` — файлы, загруженные пользователем через /doc
+    (`handlers/doc_upload.append_document_to_kb`). Числовые лабораторные
+    показатели из них дублируются в Postgres `blood_tests` (#281), поэтому
+    за анализами агент идёт в /recent_biomarkers, а сюда — за самим документом.
     """
     kb_path, source = _resolve_user_kb_path(user)
     if kb_path is None:

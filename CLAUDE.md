@@ -109,10 +109,14 @@ Telegram ID и личные данные пользователей — в `~/.c
 
 | Канал на сервере | Кто читает | Формат | Как туда попадают данные |
 |---|---|---|---|
-| PostgreSQL `blood_tests` (сырые `values`) | **дашборд** (`dashboard_generator._load_biomarkers_from_db` → `aggregate_biomarkers`) **и агент** (`/recent_biomarkers`, `/phenoage`) | канонизируется на лету `to_canonical` | `scripts/import/kb_to_blood_tests.py` |
+| PostgreSQL `blood_tests` (сырые `values`) | **дашборд** (`dashboard_generator._load_biomarkers_from_db` → `aggregate_biomarkers`) **и агент** (`/recent_biomarkers`, `/phenoage`) | канонизируется на лету `to_canonical` | `scripts/import/kb_to_blood_tests.py` **и** `/doc` в боте (см. ниже) |
 | `/app/data/kb/kb_<id>.json` (bind-mount) | агент (`/kb_value`, `/list_kb_keys`) | сырой полный KB | `scripts/sync_family_kb.py --apply` |
 
 Дашборд **больше не читает файл** `biomarkers_<id>.json` — он берёт биомаркеры из Postgres (durable, не теряются при rebuild контейнера — раньше у 4 family-юзеров дашборды пустели после деплоя). Legacy-fallback `BOTKIN_LEGACY_BIOMARKERS_JSON` удалён 11.06.2026 (аудит): флаг нигде не включался.
+
+**Третий писатель — `/doc` в боте (#281, 25.07.2026).** Когда пользователь сам грузит анализ через `/doc` и жмёт «Сохранить», `handlers/doc_upload._save_to_blood_tests` пишет показатели прямо в `blood_tests` (маппер `core/health/doc_to_blood_test.py` → `crud.upsert_blood_test`), минуя мак и `sync_user_health`. Правила те же: сырые ключи, канонизация на чтении. Ключ идемпотентности — `(user_id, test_date, test_type)`, где `test_type` = `«<лаборатория> · <8hex контент-хэша файла>»`. Нелабораторные документы (УЗИ, заключения) в `blood_tests` не попадают — их отсекает гейт `to_canonical`; они остаются в `documents[]`. Нет даты в документе — строки нет (дату не выдумываем).
+
+⚠️ **Следствие:** данные от `/doc` живут только на сервере, в локальном `~/FamilyHealth/<юзер>/knowledge_base.json` их нет. `sync_user_health` их **не затрёт** (upsert без DELETE), но и не подтянет обратно на мак. Если нужно свести — переносить в локальный KB руками.
 
 **Когда добавил новый анализ в KB → одна команда для ЛЮБОГО юзера:**
 ```bash
