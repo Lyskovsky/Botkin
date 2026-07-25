@@ -829,6 +829,54 @@ def get_all_blood_tests(db: Session, user_id: int) -> List[BloodTest]:
     return db.query(BloodTest).filter(BloodTest.user_id == user_id).order_by(desc(BloodTest.test_date)).all()
 
 
+def upsert_blood_test(db: Session, row: dict) -> bool:
+    """Идемпотентно записать анализ по ключу (user_id, test_date, test_type).
+
+    Возвращает True если строка создана, False если обновлена. Select-then-write,
+    а не диалектный ON CONFLICT: один и тот же код работает и на Postgres (прод),
+    и на SQLite (тесты). Уникальный индекс blood_tests_user_date_type_unique
+    остаётся страховкой на уровне БД.
+
+    Используется /doc (см. core/health/doc_to_blood_test.build_blood_test_row).
+    Скрипт scripts/import/kb_to_blood_tests.py ходит своим путём — он исполняется
+    на маке и пишет через ssh+psql, без ORM-сессии.
+    """
+    test_date = row["test_date"]
+    if isinstance(test_date, str):
+        test_date = date.fromisoformat(test_date)
+
+    existing = (
+        db.query(BloodTest)
+        .filter(
+            BloodTest.user_id == row["user_id"],
+            BloodTest.test_date == test_date,
+            BloodTest.test_type == row["test_type"],
+        )
+        .first()
+    )
+    status = row.get("status") or "current"
+
+    if existing is not None:
+        existing.values = row["values"]
+        existing.file_path = row.get("file_path")
+        existing.status = status
+        db.commit()
+        return False
+
+    db.add(
+        BloodTest(
+            user_id=row["user_id"],
+            test_date=test_date,
+            test_type=row["test_type"],
+            values=row["values"],
+            file_path=row.get("file_path"),
+            status=status,
+        )
+    )
+    db.commit()
+    return True
+
+
 def get_last_activity_date(db: Session, user_id: int) -> Optional[date]:
     """Get the most recent date with activity data"""
     result = db.query(ActivityLog.date).filter(ActivityLog.user_id == user_id).order_by(ActivityLog.date.desc()).first()

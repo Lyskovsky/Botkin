@@ -30,6 +30,10 @@ import sys
 from pathlib import Path
 from typing import Iterable
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from core.health.kb_schema import looks_like_us_units  # noqa: E402
+
 # SSH-tunnel out, write directly into Postgres via subprocess psql. Keeps deps
 # minimal — no psycopg2 needed locally. The script runs on Mac, ships rows to
 # Hetzner over SSH by key (same transport as sync_family_kb.py).
@@ -55,20 +59,6 @@ def _load_kb(folder_name: str) -> dict:
         raise FileNotFoundError(f"KB not found: {path}")
     with open(path, encoding="utf-8") as f:
         return json.load(f)
-
-
-def _looks_like_us_units(values: dict) -> bool:
-    """US-панель без явного поля units: единицы заданы величиной маркера-индикатора.
-
-    Гемоглобин — надёжный признак: метрический Hb всегда 3-значный (г/л, ~120-180),
-    а в g/dL — 1-значный/2-значный (< 30). Покрывает maccabi-CBC с инлайновыми
-    _ref-диапазонами вместо поля units (issue #295).
-    """
-    for key in ("hemoglobin", "Hb", "HGB"):
-        hb = values.get(key)
-        if isinstance(hb, (int, float)) and not isinstance(hb, bool) and 0 < hb < 30:
-            return True
-    return False
 
 
 def _extract_rows(kb: dict, user_id: int) -> Iterable[dict]:
@@ -113,7 +103,7 @@ def _extract_rows(kb: dict, user_id: int) -> Iterable[dict]:
             # Метрические записи остаются как есть.
             units = (entry.get("units") or "").lower()
             explicit_us = "mg/dl" in units or "g/dl" in units or "us" in units
-            if values_dict and (explicit_us or _looks_like_us_units(values_dict)):
+            if values_dict and (explicit_us or looks_like_us_units(values_dict)):
                 values_dict = {**values_dict, "_unit_system": "US"}
 
             yield {
