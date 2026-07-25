@@ -182,6 +182,49 @@ def append_document_to_kb(user_id: int, entry: dict[str, Any]) -> None:
         raise
 
 
+# Что сказать пользователю, когда лабораторной строки из документа не вышло.
+# Документ при этом всё равно сохранён в documents[] — молчать нельзя, но и
+# «сохранено» без оговорки вводило бы в заблуждение (данных в динамике нет).
+_NO_ROW_NOTES = {
+    "no_values": "\n📊 Числовых показателей не нашёл — документ лежит в карте здоровья.",
+    "not_lab": "\n📊 Лабораторных показателей не нашёл — документ лежит в карте здоровья.",
+    "no_date": "\n📊 Дату в документе не распознал — показатели не попали в динамику.",
+}
+
+
+def _save_to_blood_tests(user_id: int, extracted: dict[str, Any], stored_name: str) -> str:
+    """Пишет лабораторные показатели документа в Postgres blood_tests.
+
+    Без этого загруженный через /doc анализ не виден ни дашборду, ни /phenoage,
+    ни агенту (все читают blood_tests, а не documents[]) — issue #281.
+
+    Возвращает строку-приписку к ответу пользователю. Исключения не выпускает:
+    документ к этому моменту уже сохранён в KB, и падение БД не должно выглядеть
+    как несохранённый документ.
+    """
+    from core.health.doc_to_blood_test import build_blood_test_row
+    from database.crud import upsert_blood_test
+
+    result = build_blood_test_row(extracted, stored_name=stored_name, user_id=user_id)
+    for warning in result.warnings:
+        logger.info("doc_upload: user %s — %s", user_id, warning)
+
+    if result.row is None:
+        return _NO_ROW_NOTES.get(result.reason, "")
+
+    db = SessionLocal()
+    try:
+        created = upsert_blood_test(db, result.row)
+    except Exception:
+        logger.exception("doc_upload: запись в blood_tests не удалась (user %s)", user_id)
+        return "\n⚠️ Показатели не попали в динамику — ошибка записи в базу."
+    finally:
+        db.close()
+
+    verb = "Добавил" if created else "Обновил"
+    return f"\n📊 {verb} в динамику показателей: {result.marker_count} (дата анализа: {result.row['test_date']})."
+
+
 @router.message(Command("doc"))
 async def cmd_doc(message: Message, state: FSMContext) -> None:
     """/doc — начать загрузку медицинского документа."""
@@ -319,6 +362,7 @@ async def doc_confirm(callback: CallbackQuery, state: FSMContext) -> None:
         return
 
     extracted = pending.get("extracted") or {}
+    biomarkers_note = _save_to_blood_tests(user_id, extracted, pending["stored_name"])
     profile_note = ""
     if extracted.get("allergies") or extracted.get("conditions"):
         db = SessionLocal()
@@ -346,7 +390,10 @@ async def doc_confirm(callback: CallbackQuery, state: FSMContext) -> None:
 
     await state.update_data(pending=None)
     await callback.message.edit_text(
-        "✅ Сохранено в твою базу здоровья." + profile_note + "\n\nМожешь прислать ещё документ или /cancel.",
+        "✅ Сохранено в твою базу здоровья."
+        + biomarkers_note
+        + profile_note
+        + "\n\nМожешь прислать ещё документ или /cancel.",
         parse_mode="HTML",
     )
     await callback.answer("Сохранено")
