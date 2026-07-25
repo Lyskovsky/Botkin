@@ -221,6 +221,24 @@ _GDL_MAGNITUDE_GUARD: dict[str, tuple[float, float]] = {
 UNIT_SYSTEM_KEY = "_unit_system"
 
 
+def looks_like_us_units(values: dict) -> bool:
+    """US-панель без явного поля units: единицы заданы величиной маркера-индикатора.
+
+    Гемоглобин — надёжный признак: метрический Hb всегда 3-значный (г/л, ~120-180),
+    а в g/dL — 1-значный/2-значный (< 30). Покрывает maccabi-CBC с инлайновыми
+    _ref-диапазонами вместо поля units (issue #295) и документы из /doc, где поля
+    units нет вовсе (issue #281).
+
+    Вызывается на записи (импорт KB, /doc), чтобы проставить ``_unit_system="US"``;
+    саму конверсию делает ``to_canonical`` на чтении.
+    """
+    for key in ("hemoglobin", "Hb", "HGB"):
+        hb = values.get(key)
+        if isinstance(hb, (int, float)) and not isinstance(hb, bool) and 0 < hb < 30:
+            return True
+    return False
+
+
 def _build_reverse() -> dict[str, tuple[str, float]]:
     idx: dict[str, tuple[str, float]] = {}
     for canon_key, marker in CANONICAL.items():
