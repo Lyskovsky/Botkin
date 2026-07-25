@@ -87,6 +87,9 @@ def _make_mock_user(health_token="hvt_old_token"):
     user.height_cm = 178
     user.birth_date = None
     user.share_token = "testtoken123abc456def789ghi0"
+    # Явный дефолт: у MagicMock любой атрибут «истинный», а meal_context читает
+    # onboarding_data как dict (#340) — без этого тесты падают на .get().
+    user.onboarding_data = {}
     return user
 
 
@@ -1040,3 +1043,117 @@ def test_flag_for_devs_respects_opt_out(client, db_session):
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["status"] == "skipped_opt_out"
+
+
+# ── /meal_context: источники ограничений (#340) ───────────────────────────────
+
+
+@pytest.fixture
+def no_kb(monkeypatch):
+    """У пользователя нет KB-файла — как у самозарегистрированного юзера."""
+    from webhook import agent_tools_api
+
+    monkeypatch.setattr(agent_tools_api, "_resolve_user_kb_path", lambda user: (None, "none"))
+
+
+def test_meal_context_falls_back_to_onboarding(client, no_kb):
+    """Без KB диагнозы и аллергии берутся из users.onboarding_data."""
+    mock_user = _current_mock_user(client)
+    mock_user.onboarding_data = {
+        "chronic_conditions": ["Гипотиреоз (E03.9)"],
+        "allergies": ["пыльца"],
+    }
+
+    body = client.get("/api/agent/meal_context").json()
+
+    assert body["constraints"] == ["Гипотиреоз (E03.9)"]
+    assert body["constraints_source"] == "onboarding"
+    assert body["allergies"] == ["пыльца"]
+
+
+def test_meal_context_kb_wins_over_onboarding(client, monkeypatch, tmp_path):
+    """KB — приоритетный источник: онбординг не перебивает файл."""
+    from webhook import agent_tools_api
+
+    kb_file = tmp_path / "kb_895655.json"
+    kb_file.write_text('{"chronic_diagnoses": ["Демпинг-синдром"]}', encoding="utf-8")
+    monkeypatch.setattr(agent_tools_api, "_resolve_user_kb_path", lambda user: (kb_file, "test"))
+
+    mock_user = _current_mock_user(client)
+    mock_user.onboarding_data = {"chronic_conditions": ["Гипотиреоз"]}
+
+    body = client.get("/api/agent/meal_context").json()
+
+    assert body["constraints"] == ["Демпинг-синдром"]
+    assert body["constraints_source"] == "kb"
+
+
+def test_meal_context_no_data_reports_none(client, no_kb):
+    """Ни KB, ни онбординга — пустой список и source=none (не выдумывать)."""
+    _current_mock_user(client).onboarding_data = {}
+
+    body = client.get("/api/agent/meal_context").json()
+
+    assert body["constraints"] == []
+    assert body["constraints_source"] == "none"
+    assert body["allergies"] == []
+
+
+def test_meal_context_splits_freetext_conditions(client, no_kb):
+    """Свободный текст из онбординга режется на пункты общим сплиттером."""
+    _current_mock_user(client).onboarding_data = {"chronic_conditions": "Гипотиреоз. Принимаю Эутирокс"}
+
+    body = client.get("/api/agent/meal_context").json()
+
+    assert body["constraints"] == ["Гипотиреоз", "Принимаю Эутирокс"]
+    assert body["constraints_source"] == "onboarding"
+
+
+# ── /save_health_profile: мягкий сбор медпрофиля (#340) ───────────────────────
+
+
+def test_save_health_profile_writes_and_sets_flag(client, db_session):
+    """Диагнозы и аллергии со слов пациента ложатся в onboarding_data + флаг."""
+    r = client.post(
+        "/api/agent/save_health_profile",
+        json={"chronic_conditions": ["Гипотиреоз, принимаю Эутирокс 50 мкг"], "allergies": ["пыльца"]},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == "ok"
+    assert body["added"] == {"allergies": 1, "chronic_conditions": 1}
+    assert body["health_profile_asked"] is True
+
+    row = db_session.query(User).filter_by(telegram_id=895655).first()
+    assert row.onboarding_data["chronic_conditions"] == ["Гипотиреоз, принимаю Эутирокс 50 мкг"]
+    assert row.onboarding_data["allergies"] == ["пыльца"]
+    assert row.onboarding_data["health_profile_asked"] is True
+
+
+def test_save_health_profile_deduplicates(client, db_session):
+    """Повторная запись того же пункта не плодит дубли (case-insensitive)."""
+    client.post("/api/agent/save_health_profile", json={"chronic_conditions": ["Астма"]})
+
+    body = client.post("/api/agent/save_health_profile", json={"chronic_conditions": ["астма"]}).json()
+
+    assert body["added"] == {"allergies": 0, "chronic_conditions": 0}
+    row = db_session.query(User).filter_by(telegram_id=895655).first()
+    assert row.onboarding_data["chronic_conditions"] == ["Астма"]
+
+
+def test_save_health_profile_nothing_to_report(client, db_session):
+    """«Нечего сообщить» ничего не пишет в списки, но помечает вопрос заданным."""
+    body = client.post("/api/agent/save_health_profile", json={"nothing_to_report": True}).json()
+
+    assert body["status"] == "ok"
+    assert body["added"] == {}
+    row = db_session.query(User).filter_by(telegram_id=895655).first()
+    assert row.onboarding_data["health_profile_asked"] is True
+    assert "chronic_conditions" not in row.onboarding_data
+
+
+def _current_mock_user(client):
+    """Достать mock-юзера, которым подменён get_agent_user в фикстуре client."""
+    from webhook.jwt_auth import get_agent_user
+
+    return client.app.dependency_overrides[get_agent_user]()

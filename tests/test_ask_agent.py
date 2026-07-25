@@ -270,6 +270,29 @@ def test_build_default_agent_prompt_never_empty_without_data():
     assert "AI-агент" in prompt
 
 
+def test_build_default_prompt_no_history_claim_when_profile_exists():
+    """#340: при непустом медпрофиле промпт НЕ утверждает, что медистории нет —
+    иначе агент верил базовой фразе и советовал как здоровому, игнорируя блок
+    «Медпрофиль» с диагнозами."""
+    u = User(
+        telegram_id=3,
+        first_name="Тест",
+        onboarding_data={"name": "Тест", "chronic_conditions": ["Гипотиреоз (E03.9)"]},
+    )
+
+    prompt = agent_chat.build_default_agent_prompt(u)
+
+    assert "без подробной медицинской истории" not in prompt
+    assert "Медпрофиль" in prompt  # отсылка к блоку, который приклеивается ниже
+
+
+def test_build_default_prompt_keeps_history_claim_without_profile():
+    """Без диагнозов/аллергий фраза про отсутствие медистории остаётся."""
+    u = User(telegram_id=4, first_name="Тест", onboarding_data={"name": "Тест"})
+
+    assert "без подробной медицинской истории" in agent_chat.build_default_agent_prompt(u)
+
+
 def test_user_without_system_prompt_uses_default(agent_db, monkeypatch):
     """Зарегистрированный юзер без agent_system_prompt НЕ отвергается —
     агент работает на дефолтном промпте, в system уходит имя/цель юзера."""
