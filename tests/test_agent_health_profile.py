@@ -77,3 +77,9 @@ def test_ask_block_absent_when_already_asked():
 def test_ask_block_survives_missing_onboarding_data():
     """None вместо dict не роняет сборку промпта."""
     assert "save_health_profile" in _health_profile_ask_block(SimpleNamespace(onboarding_data=None))
+
+
+def test_ask_block_absent_for_users_with_custom_prompt():
+    """Семейный юзер с богатым промптом из PROFILE.md/KB — не переспрашиваем."""
+    user = SimpleNamespace(onboarding_data={}, agent_system_prompt="## Пациент\nПодробная медистория…")
+    assert _health_profile_ask_block(user) == ""

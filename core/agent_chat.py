@@ -2068,9 +2068,14 @@ def _health_profile_ask_block(user) -> str:
     это в диалоге, но ровно один раз: после ответа он зовёт save_health_profile,
     который ставит ``health_profile_asked``.
 
-    Пустая строка, если профиль уже есть или вопрос уже задавали.
+    Пустая строка, если профиль уже есть, вопрос уже задавали или у юзера
+    задан индивидуальный ``agent_system_prompt``: такой промпт собран из
+    PROFILE.md/KB (onboard_family_user.py), медистория там уже подробная —
+    спрашивать про хроники значит переспрашивать то, что агент и так знает.
     """
     data = getattr(user, "onboarding_data", None) or {}
+    if (getattr(user, "agent_system_prompt", None) or "").strip():
+        return ""
     if data.get("health_profile_asked") or _has_health_profile(user):
         return ""
     return (
