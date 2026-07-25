@@ -1444,10 +1444,14 @@ async def meal_context(
     db: Session = Depends(get_db),
 ):
     """P-002: всё нужное для «что мне съесть сейчас» ОДНИМ вызовом —
-    остаток КБЖУ на сегодня + ограничения (диагнозы) + любимые продукты.
+    остаток КБЖУ на сегодня + ограничения (диагнозы) + аллергии + любимые продукты.
 
     Зачем тул, а не три вызова: гарантирует, что ограничения-диагнозы (подагра,
     демпинг-синдром и т.п.) ВСЕГДА в контексте, и экономит токены/реплики.
+
+    Источники ограничений по приоритету: KB-файл юзера → `users.onboarding_data`
+    (#340; у самозарегистрированного юзера KB нет вовсе). Фактический источник —
+    в поле `constraints_source` ∈ {kb, onboarding, none}.
     """
     import json
 
@@ -1472,6 +1476,7 @@ async def meal_context(
 
     # Ограничения из KB (диагнозы) — чтобы советы были безопасны под состояние.
     constraints = []
+    constraints_source = "none"
     kb_path, _src = _resolve_user_kb_path(user)
     if kb_path:
         try:
@@ -1480,9 +1485,23 @@ async def meal_context(
                 v = kb.get(key)
                 if v:
                     constraints = v if isinstance(v, list) else [v]
+                    constraints_source = "kb"
                     break
         except Exception:
             logger.exception("meal_context: KB read failed")
+
+    # #340: у самозарегистрированного юзера KB-файла нет вовсе — диагнозы лежат
+    # в users.onboarding_data (пишет /doc через merge_onboarding_lists). Без этого
+    # fallback тул отдавал constraints=[] и советы шли как здоровому.
+    # Аллергии для «что съесть» критичнее диагнозов — отдаём отдельным полем.
+    from core.health.onboarding_lists import ALLERGY_KEYS, CONDITION_KEYS, onboarding_list
+
+    onboarding = user.onboarding_data or {}
+    if not constraints:
+        constraints = onboarding_list(onboarding, CONDITION_KEYS)
+        if constraints:
+            constraints_source = "onboarding"
+    allergies = onboarding_list(onboarding, ALLERGY_KEYS)
 
     return {
         "status": "ok",
@@ -1500,6 +1519,8 @@ async def meal_context(
             "fiber": totals.get("fiber"),
         },
         "constraints": constraints,
+        "constraints_source": constraints_source,
+        "allergies": allergies,
         "frequent_products": products[:15],
     }
 
@@ -2989,6 +3010,59 @@ async def update_profile_questionnaire(
         "status": "ok",
         "updated_fields": list(updates.keys()),
         "telegram_id": user.telegram_id,
+    }
+
+
+class SaveHealthProfileRequest(BaseModel):
+    chronic_conditions: list[str] = Field(default_factory=list)
+    allergies: list[str] = Field(default_factory=list)
+    nothing_to_report: bool = False
+
+
+@router.post("/save_health_profile")
+async def save_health_profile(
+    req: SaveHealthProfileRequest,
+    user=Depends(require_agent_scope("rw")),
+    db: Session = Depends(get_db),
+):
+    """Записать медпрофиль со слов пациента (#340).
+
+    Онбординг-квиз про хроники и постоянные лекарства больше не спрашивает
+    (шаг убран в f366c98), поэтому у самозарегистрированного юзера медпрофиль
+    пуст, пока он не загрузит документ через /doc. Этот эндпоинт — второй
+    канал: агент спрашивает в диалоге и сохраняет ответ.
+
+    Пишет в те же ключи `users.onboarding_data`, откуда читают промпт-блок,
+    отчёт для врача и /meal_context (реестр — core/health/onboarding_lists.py),
+    через `merge_onboarding_lists` (дедуп case-insensitive).
+
+    Флаг `health_profile_asked` ставится в любом случае — и когда что-то
+    записали, и когда пользователю нечего сообщить: вопрос задан, повторять
+    его не нужно.
+    """
+    from database.crud import get_user_by_telegram_id, merge_onboarding_lists
+
+    added: dict[str, int] = {}
+    if req.chronic_conditions or req.allergies:
+        added = merge_onboarding_lists(
+            db,
+            user.telegram_id,
+            {"allergies": req.allergies, "chronic_conditions": req.chronic_conditions},
+        )
+
+    row = get_user_by_telegram_id(db, user.telegram_id)
+    if row is None:
+        return {"status": "error", "error": "user not found"}
+    data = dict(row.onboarding_data or {})
+    data["health_profile_asked"] = True
+    row.onboarding_data = data  # реассайн → SQLAlchemy видит изменение JSONB
+    db.commit()
+
+    return {
+        "status": "ok",
+        "added": added,
+        "nothing_to_report": req.nothing_to_report,
+        "health_profile_asked": True,
     }
 
 

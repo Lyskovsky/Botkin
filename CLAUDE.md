@@ -455,6 +455,25 @@ AI-врач живёт **внутри** основного aiogram-бота (`@B
 
 Решение принято 21.05.2026 вместо NanoClaw (отдельной контейнерной инфры). Подробнее — [ADR-0002](docs/architecture/decisions/0002-rejecting-nanoclaw-for-simpler-agent.md).
 
+### Медпрофиль пациента: аллергии, хроники, постоянные лекарства
+
+Живёт в `users.onboarding_data` (JSONB). Единый реестр ключей и сплиттер свободного текста — **`core/health/onboarding_lists.py`** (`CONDITION_KEYS`, `ALLERGY_KEYS`, `onboarding_list`, `split_freetext`). Новые читатели/писатели подключать только через него — «куда пишем» должно совпадать с «откуда читаем».
+
+⚠️ **Онбординг-квиз про хроники и лекарства НЕ спрашивает** — шаг убран в `f366c98` («value-first quiz»), legacy-шаг `chronic` ремапится на `artifact`. Не искать этот вопрос в онбординге и не считать, что профиль заполнится сам.
+
+| | Кто | Что делает |
+|---|---|---|
+| **Пишут** | `/doc` (`telegram-bot/handlers/doc_upload.py`) | диагнозы/аллергии из разобранного документа → `merge_onboarding_lists` |
+| | агент, тул `save_health_profile` | со слов пациента в диалоге; ставит флаг `health_profile_asked` |
+| **Читают** | `core/agent_chat.py::_health_profile_block` | блок «Медпрофиль» в системном промпте (+ курение из `users.smoking_status`) |
+| | `core/agent_chat.py::_health_profile_ask_block` | инструкция спросить один раз, если профиль пуст и флага нет |
+| | `/meal_context` (`webhook/agent_tools_api.py`) | `constraints` — KB-файл приоритетнее, затем `onboarding_data`; источник в `constraints_source` |
+| | `services/doctor_report.py` | «проблемы»/аллергии/лекарства в отчёте для врача |
+
+Курение — отдельная колонка `users.smoking_status` (`never`/`former`/`current`/`occasional`), не в `onboarding_data`. Её читают промпт-блок, дашборд и `/user_profile`.
+
+История: #340 (курение в промпт, fallback `/meal_context`, `save_health_profile`), #7/#309 (сплиттер: запятая не разделитель пунктов).
+
 ---
 
 ## Архитектура проекта (код)
