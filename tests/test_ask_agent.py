@@ -529,3 +529,76 @@ def test_compact_mode_food_key_priority():
     assert len(names) == 2
     assert "киноа" in names[0]
     assert "Яблоко" in names[1]
+
+
+# ── #347: транзакция не висит поперёк вызова Anthropic ───────────────────────
+
+
+def _session_recording_factory(TestSession, sink):
+    """Фабрика сессий, складывающая созданные сессии в sink (для инспекции в тесте)."""
+
+    def _factory(*args, **kwargs):
+        session = TestSession(*args, **kwargs)
+        sink.append(session)
+        return session
+
+    return _factory
+
+
+def test_no_open_transaction_during_anthropic_call(agent_db, monkeypatch):
+    """(#347) В момент HTTP-вызова Anthropic ни одна сессия ask_agent не должна
+    быть в открытой транзакции.
+
+    Прод-инцидент 26.07.2026: транзакция висела открытой поперёк requests.post
+    (до 60с), а session-level idle_in_transaction_session_timeout=15000 рвал
+    соединение — INSERT ответа падал, готовый ответ пользователю не доходил.
+    """
+    sessions: list = []
+    monkeypatch.setattr(agent_chat, "SessionLocal", _session_recording_factory(agent_db, sessions))
+
+    tx_states: list[list[bool]] = []
+
+    class TxProbeRequests(FakeRequests):
+        def post(self, url, headers=None, json=None, timeout=None, params=None):
+            if url == agent_chat.ANTHROPIC_API_URL:
+                tx_states.append([s.in_transaction() for s in sessions])
+            return super().post(url, headers=headers, json=json, timeout=timeout, params=params)
+
+    fake = TxProbeRequests(
+        [
+            _anthropic_tool_use("get_weight_history", {"days": 7}),
+            _anthropic_text("Вес 82.0 кг, тренд стабильный."),
+        ],
+        tool_payload={"status": "ok", "latest": {"weight_kg": 82.0}},
+    )
+    monkeypatch.setattr(agent_chat, "requests", fake)
+
+    reply = agent_chat.ask_agent(895655, "что с весом за неделю?")
+
+    assert reply
+    assert tx_states, "Anthropic ни разу не вызвался — тест не проверил ничего"
+    for call_no, snapshot in enumerate(tx_states):
+        assert not any(snapshot), f"вызов Anthropic #{call_no}: сессия осталась в открытой транзакции"
+
+
+def test_answer_returned_even_if_history_save_fails(agent_db, monkeypatch):
+    """(#347) Сбой записи в agent_conversations не съедает уже сгенерированный
+    (и оплаченный) ответ — текст всё равно доходит до пользователя.
+    """
+    from sqlalchemy.exc import OperationalError
+
+    real_save = agent_chat._save_message
+
+    def _failing_save(db, user_id, role, content, tool_use_id=None, source="botkinclaw"):
+        if role == "assistant":
+            raise OperationalError("INSERT INTO agent_conversations", {}, Exception("server closed the connection"))
+        return real_save(db, user_id, role, content, tool_use_id=tool_use_id, source=source)
+
+    monkeypatch.setattr(agent_chat, "_save_message", _failing_save)
+
+    fake = FakeRequests([_anthropic_text("ЛФК начинай с изометрии, 2 подхода по 10 секунд.")])
+    monkeypatch.setattr(agent_chat, "requests", fake)
+
+    reply = agent_chat.ask_agent(895655, "как начать ЛФК для шеи?")
+
+    assert "изометри" in reply
