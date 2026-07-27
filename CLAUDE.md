@@ -339,6 +339,8 @@ python3 scripts/sync_user_health.py --all --apply
 - ❌ Читать items только по одному ключу (`it["food"]`) — есть 3 схемы одновременно; использовать `_item_name()` из `core/food/fiber_table.py`
 - ❌ Писать items без поля `fiber` — прогонять через `enrich_items_with_fiber()` перед INSERT
 - ❌ Писать в orphan-таблицы `daily_summaries / sleep_records` — они не управляются ORM и пусты на проде. В `blood_pressure_logs / workouts` пишут только штатные raw-SQL пути (`webhook/apple_health.py`, `webhook/agent_tools_api.py`) — новые записи добавлять через них, не через ORM
+- ❌ **Держать открытую транзакцию Postgres поперёк долгого сетевого вызова** (LLM, внешний API). Сессии живут с `idle_in_transaction_session_timeout` (15с, `database/__init__.py`) — Postgres обрывает такое соединение, следующий запрос падает с `OperationalError`. Перед сетью закрывать транзакцию (`_end_open_tx` в `core/agent_chat.py`). Транзакцию открывают не только записи: после `commit()` ORM-объект истекает (`expire_on_commit=True`), и **чтение его атрибута** тянет refresh-SELECT. Прецедент #347 (26.07.2026): агент терял ответы, и чем содержательнее ответ — тем вероятнее терялся
+- ❌ Ронять уже полученный от LLM ответ из-за сбоя записи в БД — генерация оплачена. Логировать сбой персистентности, но ответ пользователю отдавать (`_persist_turn`)
 
 ---
 
