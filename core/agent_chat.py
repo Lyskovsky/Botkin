@@ -1872,29 +1872,39 @@ def _end_open_tx(db) -> None:
             logger.exception("agent_chat: rollback после неудачного commit тоже не удался")
 
 
-def _persist_turn(db, user_id: int, role: str, content: Any, source: str) -> bool:
-    """Сохранить turn диалога так, чтобы сбой БД не съел уже готовый ответ.
+def _persist_turns(db, user_id: int, turns: list[tuple[str, str | list[dict]]], source: str) -> None:
+    """Сохранить один или несколько turn'ов диалога ОДНОЙ транзакцией.
 
-    #347: раньше OperationalError на INSERT всплывал наружу — сгенерированный
-    (и оплаченный) ответ выбрасывался, пользователь видел «что-то сломалось».
-    Теперь сбой персистентности только логируется. Возвращает True, если
-    сохранили.
+    #347, две задачи разом:
+
+    1. Сбой БД не должен съедать уже готовый ответ: раньше OperationalError на
+       INSERT всплывал наружу, сгенерированный (и оплаченный) ответ
+       выбрасывался, пользователь видел «что-то сломалось». Теперь сбой только
+       логируется.
+    2. Пара ``assistant``(tool_use) + ``tool_result`` пишется атомарно. Если
+       сохранить tool_use и потерять tool_result, следующий ``ask_agent``
+       поднимет из БД осиротевший tool_use — Anthropic отвечает 400 на такую
+       историю. ``_validate_history`` её вычистит, но вместе с контекстом того
+       хода, причём молча. Атомарность убирает саму возможность рассинхрона.
+
+    Широкий ``except Exception`` — намеренно: смысл функции в том, чтобы НИКАКОЙ
+    сбой персистентности не мешал отдать оплаченный ответ. Traceback пишется в
+    лог целиком, ошибка не глотается молча.
     """
     try:
-        _save_message(db, user_id, role, content, source=source)
+        for role, content in turns:
+            _save_message(db, user_id, role, content, source=source)
         db.commit()
-        return True
     except Exception:
         logger.exception(
-            "agent_chat: turn не сохранён (role=%s user=%s) — ответ пользователю всё равно отдаём",
-            role,
+            "agent_chat: turn'ы не сохранены (roles=%s user=%s) — ответ пользователю всё равно отдаём",
+            [role for role, _ in turns],
             user_id,
         )
         try:
             db.rollback()
         except Exception:
             logger.exception("agent_chat: rollback после сбоя сохранения не удался")
-        return False
 
 
 def log_router_raw_text(user_id: int, raw_text: str, msg_type: str) -> None:
@@ -2239,6 +2249,9 @@ def ask_agent(
         history.append({"role": "user", "content": user_text})
 
         # Persist user turn immediately so a crash mid-call doesn't lose it.
+        # Намеренно НЕ через _persist_turns: тут сбой БД должен всплыть наружу.
+        # Ответа ещё нет (сеть даже не тронута), терять нечего, а работать
+        # дальше с мёртвой БД смысла нет — tools всё равно не ответят.
         _save_message(db, user_id, "user", user_text, source=src)
         db.commit()
 
@@ -2905,9 +2918,9 @@ def ask_agent(
             blocks = response.get("content", [])
 
             if stop_reason == "tool_use":
-                # Record assistant turn (text + tool_use blocks). #347: сбой
-                # записи не должен обрывать ход — история есть в памяти.
-                _persist_turn(db, user_id, "assistant", blocks, src)
+                # Record assistant turn (text + tool_use blocks) в память сразу,
+                # в БД — ниже, одной транзакцией вместе с tool_result (#347):
+                # осиротевший tool_use в истории ломает следующий ход.
                 history.append({"role": "assistant", "content": blocks})
 
                 # Прогресс по tools этого turn'a. Если в одном turn модель
@@ -2959,14 +2972,15 @@ def ask_agent(
                 except Exception:
                     logger.exception("P-003 stale-history invalidation failed (non-fatal)")
 
-                _persist_turn(db, user_id, "tool_result", tool_results, src)
+                # tool_use + tool_result — одной транзакцией (см. _persist_turns).
+                _persist_turns(db, user_id, [("assistant", blocks), ("tool_result", tool_results)], src)
                 history.append({"role": "user", "content": tool_results})
                 continue  # next iteration — model will incorporate tool results
 
             # stop_reason in ("end_turn", "max_tokens", "stop_sequence") — final.
             # #347: ответ уже сгенерирован и оплачен — сбой записи в историю
             # его не отменяет, отдаём пользователю в любом случае.
-            _persist_turn(db, user_id, "assistant", blocks, src)
+            _persist_turns(db, user_id, [("assistant", blocks)], src)
 
             # Extract text
             text_parts = [b["text"] for b in blocks if b.get("type") == "text"]

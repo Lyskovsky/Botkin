@@ -602,3 +602,56 @@ def test_answer_returned_even_if_history_save_fails(agent_db, monkeypatch):
     reply = agent_chat.ask_agent(895655, "как начать ЛФК для шеи?")
 
     assert "изометри" in reply
+
+
+def test_tool_pair_saved_atomically_and_next_turn_survives(agent_db, monkeypatch):
+    """(#347) Сбой записи в tool-цикле не оставляет в БД осиротевший tool_use.
+
+    Если сохранить assistant(tool_use) и потерять tool_result, следующий вызов
+    поднимет из истории tool_use без пары — Anthropic отвечает на такое 400.
+    Пара пишется одной транзакцией, поэтому в БД либо оба turn'а, либо ни один.
+    """
+    from sqlalchemy.exc import OperationalError
+
+    real_save = agent_chat._save_message
+
+    def _fail_on_tool_result(db, user_id, role, content, tool_use_id=None, source="botkinclaw"):
+        if role == "tool_result":
+            raise OperationalError("INSERT INTO agent_conversations", {}, Exception("server closed the connection"))
+        return real_save(db, user_id, role, content, tool_use_id=tool_use_id, source=source)
+
+    monkeypatch.setattr(agent_chat, "_save_message", _fail_on_tool_result)
+
+    fake = FakeRequests(
+        [
+            _anthropic_tool_use("get_weight_history", {"days": 7}),
+            _anthropic_text("Вес 82.0 кг."),
+        ],
+        tool_payload={"status": "ok", "latest": {"weight_kg": 82.0}},
+    )
+    monkeypatch.setattr(agent_chat, "requests", fake)
+
+    reply = agent_chat.ask_agent(895655, "что с весом?")
+
+    # Ответ пользователю дошёл, несмотря на сбой записи
+    assert "82.0" in reply
+
+    # В БД нет осиротевшего tool_use: раз tool_result не сохранился,
+    # то и парный assistant-turn не должен был сохраниться.
+    roles = [r.role for r in _history_rows(agent_db)]
+    assert roles.count("tool_result") == 0
+    assert roles.count("assistant") == 1, "в истории остался осиротевший tool_use"
+
+    # Следующий ход поднимает историю из БД и не падает
+    monkeypatch.setattr(agent_chat, "_save_message", real_save)
+    fake_next = FakeRequests([_anthropic_text("Тренд стабильный.")])
+    monkeypatch.setattr(agent_chat, "requests", fake_next)
+
+    reply_next = agent_chat.ask_agent(895655, "а тренд?")
+
+    assert "стабильный" in reply_next
+    sent_history = fake_next.anthropic_calls[0]["payload"]["messages"]
+    for msg in sent_history:
+        blocks = msg["content"]
+        if isinstance(blocks, list):
+            assert not any(b.get("type") == "tool_use" for b in blocks), "осиротевший tool_use ушёл в Anthropic"
