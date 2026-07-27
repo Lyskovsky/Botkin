@@ -55,6 +55,15 @@ engine = create_engine(
     pool_size=5,
     max_overflow=10,
     connect_args=_build_connect_args(DATABASE_URL),
+    # hide_parameters — приватность, НЕ косметика (#347, security-review).
+    # DBAPIError.__str__ по умолчанию печатает `[SQL: …] [parameters: {…}]`, а
+    # параметром INSERT в agent_conversations уезжает ВЕСЬ turn диалога —
+    # диагнозы, лекарства, анализы. Любой logger.exception по такой ошибке
+    # писал это в /opt/botkin/logs открытым текстом (проверено на проде
+    # 26.07.2026: в трейсбеке лежал ответ агента про диагноз пациента).
+    # Ценой отладочного удобства (в ошибке остаётся только текст SQL)
+    # закрываем утечку медданных в логи.
+    hide_parameters=True,
 )
 
 # Session factory

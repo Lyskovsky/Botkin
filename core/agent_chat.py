@@ -1848,6 +1848,65 @@ def _save_message(
     )
 
 
+def _end_open_tx(db) -> None:
+    """Закрыть открытую транзакцию перед долгим сетевым вызовом.
+
+    Прод-инцидент #347 (26.07.2026): ask_agent держал транзакцию открытой
+    поперёк ``requests.post`` к Anthropic (до 60с на вызов), а session-level
+    ``idle_in_transaction_session_timeout=15000`` (см. database/__init__.py)
+    рвал такое соединение. Следующий INSERT падал с OperationalError, и
+    пользователь вместо готового ответа получал «что-то сломалось». Соединение
+    БЕЗ открытой транзакции этот тайм-аут не трогает.
+
+    Транзакцию открывают не только записи: после ``db.commit()`` ORM-объект
+    ``user`` истекает (expire_on_commit=True по умолчанию), и любое чтение его
+    атрибута тянет refresh-SELECT — то есть снова открывает транзакцию.
+    """
+    try:
+        db.commit()
+    except Exception:
+        logger.exception("agent_chat: commit перед вызовом Anthropic не удался — откатываю")
+        try:
+            db.rollback()
+        except Exception:
+            logger.exception("agent_chat: rollback после неудачного commit тоже не удался")
+
+
+def _persist_turns(db, user_id: int, turns: list[tuple[str, str | list[dict]]], source: str) -> None:
+    """Сохранить один или несколько turn'ов диалога ОДНОЙ транзакцией.
+
+    #347, две задачи разом:
+
+    1. Сбой БД не должен съедать уже готовый ответ: раньше OperationalError на
+       INSERT всплывал наружу, сгенерированный (и оплаченный) ответ
+       выбрасывался, пользователь видел «что-то сломалось». Теперь сбой только
+       логируется.
+    2. Пара ``assistant``(tool_use) + ``tool_result`` пишется атомарно. Если
+       сохранить tool_use и потерять tool_result, следующий ``ask_agent``
+       поднимет из БД осиротевший tool_use — Anthropic отвечает 400 на такую
+       историю. ``_validate_history`` её вычистит, но вместе с контекстом того
+       хода, причём молча. Атомарность убирает саму возможность рассинхрона.
+
+    Широкий ``except Exception`` — намеренно: смысл функции в том, чтобы НИКАКОЙ
+    сбой персистентности не мешал отдать оплаченный ответ. Traceback пишется в
+    лог целиком, ошибка не глотается молча.
+    """
+    try:
+        for role, content in turns:
+            _save_message(db, user_id, role, content, source=source)
+        db.commit()
+    except Exception:
+        logger.exception(
+            "agent_chat: turn'ы не сохранены (roles=%s user=%s) — ответ пользователю всё равно отдаём",
+            [role for role, _ in turns],
+            user_id,
+        )
+        try:
+            db.rollback()
+        except Exception:
+            logger.exception("agent_chat: rollback после сбоя сохранения не удался")
+
+
 def log_router_raw_text(user_id: int, raw_text: str, msg_type: str) -> None:
     """Логирует raw текст сообщения, ушедшего НЕ в BotkinClaw, а в роутер
     (food / vitamins / bp / weight / mixed / body_measurements).
@@ -2190,6 +2249,9 @@ def ask_agent(
         history.append({"role": "user", "content": user_text})
 
         # Persist user turn immediately so a crash mid-call doesn't lose it.
+        # Намеренно НЕ через _persist_turns: тут сбой БД должен всплыть наружу.
+        # Ответа ещё нет (сеть даже не тронута), терять нечего, а работать
+        # дальше с мёртвой БД смысла нет — tools всё равно не ответят.
         _save_message(db, user_id, "user", user_text, source=src)
         db.commit()
 
@@ -2786,6 +2848,10 @@ def ask_agent(
             import time as _time
 
             def _post_with_overload_retry(p):
+                # #347: закрываем транзакцию ДО сети. Внутри этого хелпера БД
+                # не трогаем, поэтому одного вызова хватает на все три post'а
+                # (основной + retry + fallback).
+                _end_open_tx(db)
                 # Strategy: fast fallback. Anthropic 529 обычно сигнализирует
                 # пиковую нагрузку на конкретный compute pool — короткий retry
                 # её не разгребает. Лучше быстро прыгнуть на 4.5 (другой pool).
@@ -2852,8 +2918,9 @@ def ask_agent(
             blocks = response.get("content", [])
 
             if stop_reason == "tool_use":
-                # Record assistant turn (text + tool_use blocks)
-                _save_message(db, user_id, "assistant", blocks, source=src)
+                # Record assistant turn (text + tool_use blocks) в память сразу,
+                # в БД — ниже, одной транзакцией вместе с tool_result (#347):
+                # осиротевший tool_use в истории ломает следующий ход.
                 history.append({"role": "assistant", "content": blocks})
 
                 # Прогресс по tools этого turn'a. Если в одном turn модель
@@ -2905,14 +2972,15 @@ def ask_agent(
                 except Exception:
                     logger.exception("P-003 stale-history invalidation failed (non-fatal)")
 
-                _save_message(db, user_id, "tool_result", tool_results, source=src)
+                # tool_use + tool_result — одной транзакцией (см. _persist_turns).
+                _persist_turns(db, user_id, [("assistant", blocks), ("tool_result", tool_results)], src)
                 history.append({"role": "user", "content": tool_results})
-                db.commit()
                 continue  # next iteration — model will incorporate tool results
 
-            # stop_reason in ("end_turn", "max_tokens", "stop_sequence") — final
-            _save_message(db, user_id, "assistant", blocks, source=src)
-            db.commit()
+            # stop_reason in ("end_turn", "max_tokens", "stop_sequence") — final.
+            # #347: ответ уже сгенерирован и оплачен — сбой записи в историю
+            # его не отменяет, отдаём пользователю в любом случае.
+            _persist_turns(db, user_id, [("assistant", blocks)], src)
 
             # Extract text
             text_parts = [b["text"] for b in blocks if b.get("type") == "text"]
