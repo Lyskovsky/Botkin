@@ -147,6 +147,77 @@ def test_upsert_rows_counts_updates():
     assert wt.upsert_rows(cur, 1, rows) == (0, 1)
 
 
+# ── SQL-путь для запуска с Мака (ssh+psql) ────────────────────────────────────
+
+
+def _rows_one(extra: dict | None = None):
+    """Одна строка: вес + опционально доп. метрики {meastype: (value, unit)}."""
+    measures = [{"type": 1, "value": 109532, "unit": -3}]
+    measures += [{"type": t, "value": v, "unit": u} for t, (v, u) in (extra or {}).items()]
+    return wt.parse_measure_groups([_grp(1754373000, measures)])
+
+
+def test_build_upsert_sql_nulls_missing_fields():
+    """Замер без состава тела (биоимпеданс не дочитал) → NULL, а не падение."""
+    sql = wt.build_upsert_sql(836757955, _rows_one())
+    assert sql.count("INSERT INTO weights") == 1
+    assert "836757955" in sql and "109.532" in sql
+    assert "NULL" in sql  # body_fat/muscle_mass/... отсутствуют
+    assert "'withings'" in sql
+    assert sql.rstrip().endswith(";")
+
+
+def test_build_upsert_sql_rounds_visceral_and_keeps_coalesce():
+    sql = wt.build_upsert_sql(1, _rows_one({170: (62, -1)}))  # висцеральный 6.2
+    assert ", 6, 'withings')" in sql  # округлён под Integer-колонку
+    assert "COALESCE(EXCLUDED.muscle_mass, weights.muscle_mass)" in sql
+
+
+def test_build_upsert_sql_batches_rows():
+    rows = wt.parse_measure_groups(
+        [
+            _grp(1754373000, [{"type": 1, "value": 109000, "unit": -3}]),
+            _grp(1754460000, [{"type": 1, "value": 108500, "unit": -3}]),
+        ]
+    )
+    sql = wt.build_upsert_sql(1, rows)
+    assert sql.count("INSERT INTO weights") == 2
+
+
+def test_build_upsert_sql_empty_rows():
+    assert wt.build_upsert_sql(1, []) == ""
+
+
+def test_push_via_ssh_counts_and_raises(monkeypatch):
+    monkeypatch.setenv("BOTKIN_REMOTE_SSH", "user@example")
+    monkeypatch.setenv("BOTKIN_REMOTE_PSQL", "psql -d db")
+    calls = {}
+
+    def fake_run(cmd, input=None, capture_output=None, text=None):
+        calls["cmd"] = cmd
+        calls["input"] = input
+        return types.SimpleNamespace(returncode=0, stdout="INSERT 0 1\nINSERT 0 1\n", stderr="")
+
+    monkeypatch.setattr(wt, "subprocess", types.SimpleNamespace(run=fake_run))
+    assert wt.push_via_ssh("SQL") == (2, 0)
+    assert "user@example" in calls["cmd"] and calls["input"] == "SQL"
+
+    def fail_run(cmd, input=None, capture_output=None, text=None):
+        return types.SimpleNamespace(returncode=255, stdout="", stderr="ssh: connect refused")
+
+    monkeypatch.setattr(wt, "subprocess", types.SimpleNamespace(run=fail_run))
+    with pytest.raises(wt.WithingsError):
+        wt.push_via_ssh("SQL")
+
+
+def test_push_via_ssh_requires_env(monkeypatch):
+    """Реквизиты инфраструктуры только из .env — без них падаем с понятной ошибкой."""
+    monkeypatch.delenv("BOTKIN_REMOTE_SSH", raising=False)
+    monkeypatch.delenv("BOTKIN_REMOTE_PSQL", raising=False)
+    with pytest.raises(wt.WithingsError, match="BOTKIN_REMOTE_SSH"):
+        wt.push_via_ssh("SQL")
+
+
 # ── токены ────────────────────────────────────────────────────────────────────
 
 
