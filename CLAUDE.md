@@ -139,6 +139,7 @@ python3 scripts/sync_user_health.py --user <telegram_id> --apply   # или --al
 | Сон, стресс, HRV, Body Battery | Garmin API | `data/garmin/{sleep,stress,hrv,body-battery}/` | то же |
 | Тренировки | Garmin API | `data/garmin/activities/` | то же |
 | Вес, жир, висцеральный жир | Zepp API (CN3) | `data/zepp_export_latest.csv` | `scripts/import/zepp_api.py` (токен ~7 дней, reauth через `--code URL`) |
+| Вес + ПОЛНЫЙ состав тела (мышцы, вода, кости, висцеральный жир) | Withings API (весы Body Smart) | таблица `weights` (`source='withings'`) | `scripts/import/withings_api.py --user <tg_id>`. Нужен, потому что **в HealthKit нет типов** для мышечной массы/воды/костной массы/висцерального жира — через HAE доходят только вес, % жира и безжировая масса. Апсерт с COALESCE (канал HAE не перетирается). Креды `WITHINGS_CLIENT_ID/SECRET/REFRESH_TOKEN`; refresh **ротируется** → `data/cache/withings_tokens.json` |
 | Воздух дома | Netatmo API | `data/environment/netatmo_history.json` | `scripts/import/netatmo.py` |
 | Погода | Open-Meteo | `data/weather/weather_history.json` | `scripts/import/weather.py` |
 | Глюкоза (CGM) | LibreLinkUp API (Abbott FreeStyle Libre 3) | таблица `glucose_readings` (mmol/L) | `scripts/import/librelinkup.py` (follower `dr@botkin.health`, регион EU; маппинг `cgm_connections`; онбординг `/connect_cgm`) |
