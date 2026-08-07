@@ -20,6 +20,11 @@ data/cache/withings_tokens.json (env нужен только для первич
 Токен из кэша имеет приоритет над env: иначе после ротации env-значение
 протухает и логин ломается.
 
+Общий токен с Withings-MCP (рекомендуемый способ на Маке, без второго приложения):
+задать WITHINGS_TOKENS_PATH на токен-файл MCP + client_id/secret того же приложения
+(напр. из Keychain). Тогда MCP и импортёр делят ОДНО хранилище — ротация общая,
+конфликта нет. _save_tokens мержит, чтобы не затереть ключи MCP (userid и пр.).
+
 Квирк API: HTTP-код всегда 200, реальный статус — в теле (`status`, 0 = ok).
 
 Использование:
@@ -53,7 +58,11 @@ TOKEN_URL = "https://wbsapi.withings.net/v2/oauth2"
 MEASURE_URL = "https://wbsapi.withings.net/measure"
 
 # Кэш токенов (refresh ротируется — держим на диске, чтобы переживать рестарт).
-TOKEN_CACHE = ROOT / "data" / "cache" / "withings_tokens.json"
+# WITHINGS_TOKENS_PATH позволяет указать на ЧУЖОЙ токен-файл и делить его: так
+# импортёр на Маке переиспользует токен локального Withings-MCP — единое хранилище,
+# ротация общая → нет взаимной инвалидации, второе приложение не нужно.
+# При общем файле _save_tokens мержит (не затирает чужие ключи вроде userid).
+TOKEN_CACHE = Path(os.getenv("WITHINGS_TOKENS_PATH") or ROOT / "data" / "cache" / "withings_tokens.json")
 
 # meastype → поле. Коды из официального API (сверено с рабочим клиентом).
 # Берём только то, что нужно таблице weights; давление/SpO2 идут своим каналом.
@@ -89,9 +98,17 @@ def _load_cached_tokens() -> dict:
 
 
 def _save_tokens(tokens: dict) -> None:
+    """Записать токены, СОХРАНИВ прочие ключи существующего файла.
+
+    Merge критичен при общем хранилище с Withings-MCP: у него в файле свои ключи
+    (`userid` и др.). Перезаписать файл только token-полями = сломать MCP, поэтому
+    читаем существующее и обновляем поверх.
+    """
     try:
+        merged = _load_cached_tokens()
+        merged.update(tokens)
         TOKEN_CACHE.parent.mkdir(parents=True, exist_ok=True)
-        TOKEN_CACHE.write_text(json.dumps(tokens))
+        TOKEN_CACHE.write_text(json.dumps(merged))
         TOKEN_CACHE.chmod(0o600)  # oauth-токены мед-аккаунта — только владельцу
     except OSError as e:
         logger.warning("не смог сохранить withings-токены: %s", e)
@@ -103,7 +120,17 @@ def _current_refresh_token() -> str:
 
 
 def get_access_token() -> str:
-    """Свежий access_token по refresh-токену. Ротированный refresh сохраняет на диск."""
+    """Валидный access_token из общего кэша; протух/нет — refresh (ротированный сохраняем).
+
+    Сначала пробуем действующий access_token из файла (буфер 5 мин, как в MCP) — так
+    при общем хранилище лишний раз не ротируем токен и не дёргаем сеть.
+    """
+    cached = _load_cached_tokens()
+    access_cached = cached.get("access_token")
+    exp = cached.get("expires_at") or 0
+    if access_cached and (exp - time.time()) > 300:
+        return access_cached
+
     client_id = os.getenv("WITHINGS_CLIENT_ID", "")
     client_secret = os.getenv("WITHINGS_CLIENT_SECRET", "")
     refresh = _current_refresh_token()

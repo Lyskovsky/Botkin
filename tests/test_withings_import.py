@@ -296,6 +296,54 @@ def test_get_access_token_requires_creds(monkeypatch, tmp_path):
         wt.get_access_token()
 
 
+def test_get_access_token_reuses_valid_cached(monkeypatch, tmp_path):
+    """Действующий access_token из общего файла используется без refresh (не ротируем зря)."""
+    import time
+
+    cache = tmp_path / "withings_tokens.json"
+    cache.write_text(json.dumps({"access_token": "LIVE", "refresh_token": "R", "expires_at": time.time() + 3600}))
+    monkeypatch.setattr(wt, "TOKEN_CACHE", cache)
+
+    def boom(*a, **k):
+        raise AssertionError("refresh не должен вызываться при валидном токене")
+
+    monkeypatch.setattr(wt, "requests", types.SimpleNamespace(post=boom))
+    assert wt.get_access_token() == "LIVE"
+
+
+def test_get_access_token_refreshes_when_expired(monkeypatch, tmp_path):
+    """Протухший access_token (буфер 5 мин) → идём в refresh."""
+    import time
+
+    cache = tmp_path / "withings_tokens.json"
+    cache.write_text(json.dumps({"access_token": "OLD", "refresh_token": "R", "expires_at": time.time() + 60}))
+    monkeypatch.setattr(wt, "TOKEN_CACHE", cache)
+    monkeypatch.setenv("WITHINGS_CLIENT_ID", "cid")
+    monkeypatch.setenv("WITHINGS_CLIENT_SECRET", "secret")
+
+    class _Resp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"status": 0, "body": {"access_token": "FRESH", "refresh_token": "R2", "expires_in": 10800}}
+
+    monkeypatch.setattr(wt, "requests", types.SimpleNamespace(post=lambda *a, **k: _Resp()))
+    assert wt.get_access_token() == "FRESH"
+
+
+def test_save_tokens_preserves_foreign_keys(monkeypatch, tmp_path):
+    """Регресс: общий файл с MCP — merge сохраняет чужие ключи (userid), не затирает."""
+    cache = tmp_path / "withings_tokens.json"
+    cache.write_text(json.dumps({"access_token": "OLD", "refresh_token": "R", "userid": 48719916}))
+    monkeypatch.setattr(wt, "TOKEN_CACHE", cache)
+
+    wt._save_tokens({"access_token": "NEW", "refresh_token": "R2", "expires_at": 123})
+    saved = json.loads(cache.read_text())
+    assert saved["access_token"] == "NEW" and saved["refresh_token"] == "R2"
+    assert saved["userid"] == 48719916  # ключ MCP уцелел
+
+
 # ── выборка (пагинация) ───────────────────────────────────────────────────────
 
 
