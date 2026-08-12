@@ -385,3 +385,22 @@ class TestProductNameNotAcrossNewline:
         pepper = [p for p in products if "перц" in p["name"].lower()]
         assert pepper and pepper[0]["name"] == "перца болгарского красного"
         assert pepper[0]["weight"] == 73
+
+    def test_word_before_newline_number_not_captured_as_weight(self):
+        """Регрессия 12.08.2026: паттерн №2 (продукт-перед-весом) не был закрыт для \\n
+        между именем продукта и числом, только фикс паттерна №1 был сделан 12.07.2026.
+
+        '3 яйца\\n10 грамм легкого сыра' матчило 'яйца' + '10' через перенос строки,
+        яйцо получало чужой вес 10г, и штучное правило (3×55=165г) не могло его
+        перезаписать из-за дедупликации по added_products.
+        """
+        desc = "3 яйца\n10 грамм легкого сыра"
+        products = extract_products_from_description(desc)
+
+        egg_weights = [p["weight"] for p in products if "яйц" in p["name"].lower()]
+        assert egg_weights, f"Яйцо не найдено: {products}"
+        assert all(w != 10.0 for w in egg_weights), f"Яйцо получило вес соседней строки: {products}"
+        assert any(150 <= w <= 180 for w in egg_weights), f"Ожидали ~165г (3×55) для яиц: {products}"
+
+        cheese_weights = [p["weight"] for p in products if "сыр" in p["name"].lower()]
+        assert any(w == 10.0 for w in cheese_weights), f"Сыр должен остаться 10г: {products}"
