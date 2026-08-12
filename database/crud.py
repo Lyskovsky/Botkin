@@ -502,6 +502,83 @@ def upsert_manual_weight(
     )
 
 
+def upsert_device_weight(
+    db: Session,
+    user_id: int,
+    measured_at: datetime,
+    weight: float,
+    body_fat: Optional[float] = None,
+    muscle_mass: Optional[float] = None,
+    water: Optional[float] = None,
+    bmi: Optional[float] = None,
+    visceral_fat: Optional[int] = None,
+    bone_mass: Optional[float] = None,
+    source: str = "agent_api",
+) -> bool:
+    """Идемпотентно записать замер с весов по ключу (user_id, measured_at).
+
+    Возвращает True если строка создана, False если обновлена. Не коммитит —
+    вызывающий решает границу транзакции (батч истории = одна транзакция).
+
+    Device-семантика (#170): ключ — точный таймстамп замера, без дедупа по
+    календарному дню. Дедуп по дню нужен только ручному вводу, где measured_at
+    это `now()` с микросекундами (см. upsert_manual_weight).
+
+    COALESCE-семантика на обновлении: None в поле НЕ затирает уже известное
+    значение. Каналы приносят разные наборы полей — HAE отдаёт вес/жир/безжировую
+    массу, весы Withings — полный состав (мышцы/вода/кости/висцеральный жир,
+    которых нет в HealthKit). Апсерт одного канала не должен обнулять другой.
+
+    Select-then-write, а не диалектный ON CONFLICT: один код на Postgres (прод) и
+    SQLite (тесты) — тот же приём, что в upsert_blood_test. Unique-констрейнт
+    weights_user_id_measured_at_key остаётся страховкой на уровне БД.
+    """
+    existing = (
+        db.query(Weight)
+        .filter(
+            Weight.user_id == user_id,
+            Weight.measured_at == measured_at,
+        )
+        .first()
+    )
+
+    if existing is None:
+        db.add(
+            Weight(
+                user_id=user_id,
+                measured_at=measured_at,
+                weight=weight,
+                body_fat=body_fat,
+                muscle_mass=muscle_mass,
+                water=water,
+                bmi=bmi,
+                visceral_fat=visceral_fat,
+                bone_mass=bone_mass,
+                source=source,
+            )
+        )
+        # Flush обязателен: прод-сессия создаётся с autoflush=False
+        # (database/__init__.py), поэтому без него только что добавленная строка не
+        # видна SELECT'у выше на следующей итерации батча. Два замера с одинаковым
+        # measured_at в одном запросе роняли бы commit по UNIQUE-констрейнту.
+        db.flush()
+        return True
+
+    existing.weight = weight
+    for field, value in (
+        ("body_fat", body_fat),
+        ("muscle_mass", muscle_mass),
+        ("water", water),
+        ("bmi", bmi),
+        ("visceral_fat", visceral_fat),
+        ("bone_mass", bone_mass),
+    ):
+        if value is not None:
+            setattr(existing, field, value)
+    existing.source = source
+    return False
+
+
 def get_latest_weight(db: Session, user_id: int) -> Optional[Weight]:
     """Get the most recent weight measurement"""
     return db.query(Weight).filter(Weight.user_id == user_id).order_by(desc(Weight.measured_at)).first()
