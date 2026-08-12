@@ -5,6 +5,10 @@ aiogram>=3.0.0
 python-dotenv>=1.2.2  # <1.2.2: GHSA-mf9w-mj56-hr94 (symlink-following в set_key)
 pyyaml>=6.0
 requests>=2.33.0  # <2.33: GHSA-9hjg-9r4m-mvj7 (.netrc leak), GHSA-gc5v-m9x4-r6x2 (temp-file reuse)
+# Импортируется напрямую (core/health/doc_extractor.py, telegram-bot/webhook/telegram_router.py,
+# telegram-bot/webhook/agent_tools_api.py, telegram-bot/handlers/onboarding.py). Раньше приходил
+# транзитивно через openai<3.0; openai==3.0.0 (12.08.2026) переехал на пакет httpx2 — пинуем явно.
+httpx>=0.23.0
 
 # AI Services
 openai>=1.0.0
