@@ -43,6 +43,9 @@ def db_session():
         poolclass=StaticPool,
     )
     Base.metadata.create_all(bind=engine)
+    # autoflush=False — ровно как прод-сессия (database/__init__.py). С дефолтным
+    # True тесты не увидели бы, что в батче с двумя одинаковыми measured_at
+    # SELECT не находит только что добавленную строку и commit падает по UNIQUE.
     Session = sessionmaker(autocommit=False, autoflush=False, bind=engine)
     session = Session()
     session.add(User(telegram_id=OWNER, first_name="Sasha", jwt_secret="s", is_active=True))
@@ -228,10 +231,10 @@ def test_writes_go_to_authenticated_user_only(client, db_session):
         "/api/agent/log_body_composition",
         json={"measurements": [{"measured_at": "2026-08-01T07:00:00+00:00", "weight": 82.0, "user_id": OTHER_USER}]},
     )
-    assert r.status_code in (200, 422), r.text
-    if r.status_code == 200:
-        assert all(w.user_id == OWNER for w in _rows(db_session))
-        assert not db_session.query(Weight).filter(Weight.user_id == OTHER_USER).all()
+    # Лишнее поле Pydantic молча игнорирует → ожидаем именно 200, а не «200 или 422»
+    assert r.status_code == 200, r.text
+    assert all(w.user_id == OWNER for w in _rows(db_session))
+    assert not db_session.query(Weight).filter(Weight.user_id == OTHER_USER).all()
 
 
 def test_ro_token_forbidden(db_session, monkeypatch):
@@ -305,13 +308,92 @@ def test_partial_batch_is_atomic(client, db_session):
     assert not _rows(db_session), "битый батч не должен записываться частично"
 
 
-def test_naive_timestamp_accepted(client, db_session):
-    """Клиент может прислать время без tz — не падаем, замер сохраняется."""
+def test_naive_timestamp_rejected(client, db_session):
+    """Время без офсета — отказ, а не догадки.
+
+    Ключ идемпотентности — measured_at. Naive-строку Postgres трактует по session
+    TimeZone (нигде не зафиксирован), поэтому один момент, присланный то с офсетом
+    то без, дал бы два ряда вместо одного. Лучше явная ошибка, чем тихий дубль.
+    """
     r = client.post(
         "/api/agent/log_body_composition",
         json={"measurements": [{"measured_at": "2026-08-01T07:00:00", "weight": 82.0}]},
     )
+    assert r.status_code == 400, r.text
+    assert "часовой пояс" in r.text or "офсет" in r.text
+    assert not _rows(db_session)
+
+
+def test_same_instant_different_offsets_is_one_row(client, db_session):
+    """10:00+03:00 и 07:00Z — один момент, значит одна строка, а не две.
+
+    Регрессия: без нормализации в UTC клиент, непоследовательный в сериализации
+    (например перешёл с локального времени на Z), задваивал бы историю.
+    """
+    client.post(
+        "/api/agent/log_body_composition",
+        json={"source": "withings", "measurements": [{"measured_at": "2026-08-01T07:00:00+00:00", "weight": 82.0}]},
+    )
+    r = client.post(
+        "/api/agent/log_body_composition",
+        json={"source": "withings", "measurements": [{"measured_at": "2026-08-01T10:00:00+03:00", "weight": 81.7}]},
+    )
     assert r.status_code == 200, r.text
+    assert r.json()["updated"] == 1, "тот же момент должен обновить, а не вставить"
+
     rows = _rows(db_session)
-    assert len(rows) == 1
-    assert rows[0].measured_at.hour == 7
+    assert len(rows) == 1, f"один момент — одна строка, получили {len(rows)}"
+    assert rows[0].weight == 81.7
+
+
+def test_duplicate_timestamp_within_one_batch_does_not_crash(client, db_session):
+    """Два замера с одним measured_at в ОДНОМ батче — последний выигрывает, без 500.
+
+    Прод-сессия работает с autoflush=False, поэтому без flush после db.add()
+    SELECT не видел только что добавленную строку и commit падал по
+    UNIQUE(user_id, measured_at) — сырым 500 вместо внятного ответа.
+    """
+    r = client.post(
+        "/api/agent/log_body_composition",
+        json={
+            "source": "withings",
+            "measurements": [
+                {"measured_at": "2026-08-01T07:00:00+00:00", "weight": 82.0},
+                {"measured_at": "2026-08-01T07:00:00+00:00", "weight": 81.4},
+            ],
+        },
+    )
+    assert r.status_code == 200, r.text
+
+    rows = _rows(db_session)
+    assert len(rows) == 1, f"ожидали одну строку, получили {len(rows)}"
+    assert rows[0].weight == 81.4, "должен примениться последний замер батча"
+
+
+def test_manual_source_rejected(client, db_session):
+    """source='manual'/'llm_text' зарезервирован за ручным вводом (#170).
+
+    Ручной апсерт дедупит по календарному дню — device-замер под таким source
+    он позже подменил бы, потеряв реальный замер с весов.
+    """
+    for source in ("manual", "llm_text"):
+        r = client.post(
+            "/api/agent/log_body_composition",
+            json={
+                "source": source,
+                "measurements": [{"measured_at": "2026-08-01T07:00:00+00:00", "weight": 82.0}],
+            },
+        )
+        assert r.status_code == 422, f"{source}: {r.text}"
+    assert not _rows(db_session)
+
+
+@pytest.mark.parametrize("measured_at", ["1990-05-01T07:00:00+00:00", "2099-01-01T07:00:00+00:00"])
+def test_implausible_date_rejected(client, db_session, measured_at):
+    """Замер из прошлого века или далёкого будущего молча перекосил бы агрегаты."""
+    r = client.post(
+        "/api/agent/log_body_composition",
+        json={"measurements": [{"measured_at": measured_at, "weight": 82.0}]},
+    )
+    assert r.status_code == 422, r.text
+    assert not _rows(db_session)

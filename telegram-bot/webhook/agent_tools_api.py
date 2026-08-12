@@ -188,6 +188,13 @@ class LogBPRequest(BaseModel):
     measured_at: Optional[str] = None  # ISO datetime; defaults to now
 
 
+# Границы правдоподобия для measured_at замера с весов. Умных весов с передачей
+# состава тела в 1999 не существовало, а замер «из будущего» — рассинхрон часов
+# клиента (сутки запаса) либо мусор.
+EARLIEST_PLAUSIBLE_MEASUREMENT = datetime(2000, 1, 1, tzinfo=timezone.utc)
+FUTURE_MEASUREMENT_TOLERANCE = timedelta(days=1)
+
+
 class BodyCompositionMeasurement(BaseModel):
     """Один замер с умных весов. Границы — санити-чек на ошибку единиц измерения."""
 
@@ -742,20 +749,57 @@ async def log_body_composition(
     из токена (не из тела запроса), RLS изолирует данные, доступ к серверу и
     суперюзер Postgres не нужны.
 
-    Батч атомарен: все таймстампы парсятся до первой записи, поэтому битый замер не
-    оставляет половину истории записанной.
-    """
-    from database.crud import upsert_device_weight
+    Батч атомарен: все таймстампы валидируются до первой записи, поэтому битый замер
+    не оставляет половину истории записанной. Повторный `measured_at` внутри одного
+    батча — не ошибка, применяется последний (см. flush в upsert_device_weight).
 
+    `measured_at` обязан нести часовой пояс — ключ идемпотентности должен означать
+    один и тот же момент независимо от того, как клиент его сериализовал.
+    """
+    from database.crud import MANUAL_WEIGHT_SOURCES, upsert_device_weight
+
+    # Ручные источники дедупятся по календарному дню в upsert_manual_weight (#170).
+    # Если пустить device-замеры под таким source, ручной апсерт потом подменит
+    # реальный замер с весов — каналы должны остаться различимыми.
+    if req.source in MANUAL_WEIGHT_SOURCES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"source={req.source!r} зарезервирован за ручным вводом. Используйте имя канала (withings, zepp, hae).",
+        )
+
+    now = datetime.now(timezone.utc)
     parsed = []
     for m in req.measurements:
         try:
-            parsed.append((datetime.fromisoformat(m.measured_at), m))
+            measured_at = datetime.fromisoformat(m.measured_at)
         except ValueError:
             raise HTTPException(
                 status_code=400,
-                detail=f"Invalid measured_at: {m.measured_at!r}. Use ISO datetime.",
+                detail=f"Invalid measured_at: {m.measured_at!r}. Use ISO datetime with UTC offset.",
             )
+
+        # Требуем явный офсет: эндпоинт нужен для ИДЕМПОТЕНТНОГО импорта, а ключ
+        # идемпотентности — measured_at. Naive-строка на Postgres трактуется по
+        # session TimeZone (нигде не зафиксирован), поэтому один и тот же момент,
+        # присланный то с офсетом то без, дал бы два ряда вместо одного.
+        if measured_at.tzinfo is None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"measured_at={m.measured_at!r} без часового пояса. "
+                    "Укажите офсет явно (например 2026-08-01T07:00:00+03:00 или ...Z)."
+                ),
+            )
+        measured_at = measured_at.astimezone(timezone.utc)
+
+        # Санити-границы: мусорная дата молча перекосила бы агрегаты дашборда и phenoage
+        if measured_at < EARLIEST_PLAUSIBLE_MEASUREMENT or measured_at > now + FUTURE_MEASUREMENT_TOLERANCE:
+            raise HTTPException(
+                status_code=422,
+                detail=f"measured_at={m.measured_at!r} вне правдоподобного диапазона замеров.",
+            )
+
+        parsed.append((measured_at, m))
 
     inserted = 0
     updated = 0

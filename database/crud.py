@@ -557,6 +557,11 @@ def upsert_device_weight(
                 source=source,
             )
         )
+        # Flush обязателен: прод-сессия создаётся с autoflush=False
+        # (database/__init__.py), поэтому без него только что добавленная строка не
+        # видна SELECT'у выше на следующей итерации батча. Два замера с одинаковым
+        # measured_at в одном запросе роняли бы commit по UNIQUE-констрейнту.
+        db.flush()
         return True
 
     existing.weight = weight
