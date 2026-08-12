@@ -139,6 +139,8 @@ python3 scripts/sync_user_health.py --user <telegram_id> --apply   # или --al
 | Сон, стресс, HRV, Body Battery | Garmin API | `data/garmin/{sleep,stress,hrv,body-battery}/` | то же |
 | Тренировки | Garmin API | `data/garmin/activities/` | то же |
 | Вес, жир, висцеральный жир | Zepp API (CN3) | `data/zepp_export_latest.csv` | `scripts/import/zepp_api.py` (токен ~7 дней, reauth через `--code URL`) |
+| Вес + ПОЛНЫЙ состав тела (мышцы, вода, кости, висцеральный жир) | Withings API (весы Body Smart) | таблица `weights` (`source='withings'`) | `scripts/import/withings_api.py --user <tg_id>`. Нужен, потому что **в HealthKit нет типов** для мышечной массы/воды/костной массы/висцерального жира — через HAE доходят только вес, % жира и безжировая масса. Апсерт с COALESCE (канал HAE не перетирается). Креды `WITHINGS_CLIENT_ID/SECRET/REFRESH_TOKEN`; refresh **ротируется** → `data/cache/withings_tokens.json` |
+| ↳ *канал записи для внешних весов* | — | таблица `weights` | `POST /api/agent/log_body_composition` (PAT+JWT, scope `rw`). **Предпочтительный путь** для импортёров с чужой машины: `user_id` берётся из токена, RLS изолирует данные, доступ к прод-серверу и суперюзер Postgres не нужны. `measured_at` обязан нести офсет (это ключ идемпотентности), `source` — имя канала; `manual`/`llm_text` зарезервированы за ручным вводом (#170). Заменяет схему «ssh + `docker exec psql`» из `zepp_csv.py`, которая требует членства в docker-группе = root на хосте |
 | Воздух дома | Netatmo API | `data/environment/netatmo_history.json` | `scripts/import/netatmo.py` |
 | Погода | Open-Meteo | `data/weather/weather_history.json` | `scripts/import/weather.py` |
 | Глюкоза (CGM) | LibreLinkUp API (Abbott FreeStyle Libre 3) | таблица `glucose_readings` (mmol/L) | `scripts/import/librelinkup.py` (follower `dr@botkin.health`, регион EU; маппинг `cgm_connections`; онбординг `/connect_cgm`) |
@@ -399,6 +401,11 @@ Notion-страница **«Хронолог разработки»** (ID `37bf1
    - `medical_records` — **приёмы врачей часто содержат embedded summary с ЭКГ/ЭхоКГ/УЗДГ/ЭГДС/колоноскопией** (например, 2021-03-01 atlas_therapist — там весь комплекс Атласа)
    - `ecg`, `spirometry`, `sports_tests` — функциональные тесты
 3. **Только после этого** — читать отдельные PDF/docx для деталей, которых нет в JSON.
+
+**⚠️ Граница «источника истины» — по типу данных (уточнено 12.07.2026):**
+- **Живые ежедневные потоки** — питание (`nutrition_log`), БАДы (`supplements_log`), вес/состав тела (`body_measurements`), глюкоза (`glucose_readings`), функциональные замеры (сила хвата и т.п.) — **первичны в БД Botkin (Postgres на сервере), локальный `knowledge_base.json` для них может быть УСТАРЕВШИМ**. По ним читать сначала БД (agent_tools / psql), KB — только бэкап.
+- **Курируемые документы** — анализы крови, генетика, УЗИ/МРТ, мед.записи — первичны в `knowledge_base.json` на маке (я их парсю и завожу).
+- Направление желаемой эволюции (по решению Александра 12.07): постепенно перейти на работу через Botkin как основную систему, локальную KB держать как бэкап и периодически обновлять снимок из БД (dump DB → JSON). Маркер продублирован первой строкой каждого `knowledge_base.json` (`_source_of_truth`).
 
 **Если добавили новые анализы/УЗИ в `knowledge_base.json` — обязательно регенерировать журнал:**
 ```bash
