@@ -54,7 +54,7 @@ def test_parse_measure_groups_maps_all_fields():
     assert row["weight"] == 109.532
     assert row["body_fat"] == 33.214
     assert row["muscle_mass"] == 69.53
-    assert row["water"] == 48.36
+    assert row["water"] == 44.2  # 48.36 кг воды при весе 109.532 → % (см. test_water_converted_kg_to_percent)
     assert row["bone_mass"] == 3.6
     assert row["visceral_fat"] == 6.2
     assert row["bmr"] == 2172
@@ -147,7 +147,7 @@ def test_upsert_rows_counts_updates():
     assert wt.upsert_rows(cur, 1, rows) == (0, 1)
 
 
-# ── SQL-путь для запуска с Мака (ssh+psql) ────────────────────────────────────
+# ── путь через Botkin API ─────────────────────────────────────────────────────
 
 
 def _rows_one(extra: dict | None = None):
@@ -157,65 +157,86 @@ def _rows_one(extra: dict | None = None):
     return wt.parse_measure_groups([_grp(1754373000, measures)])
 
 
-def test_build_upsert_sql_nulls_missing_fields():
-    """Замер без состава тела (биоимпеданс не дочитал) → NULL, а не падение."""
-    sql = wt.build_upsert_sql(836757955, _rows_one())
-    assert sql.count("INSERT INTO weights") == 1
-    assert "836757955" in sql and "109.532" in sql
-    assert "NULL" in sql  # body_fat/muscle_mass/... отсутствуют
-    assert "'withings'" in sql
-    assert sql.rstrip().endswith(";")
+def test_water_converted_kg_to_percent():
+    """Регресс: Withings отдаёт воду в КГ, а weights.water и поле API — ПРОЦЕНТЫ."""
+    (row,) = _rows_one({77: (48360, -3)})  # 48.36 кг при весе 109.532
+    assert row["water"] == 44.2
+    assert "hydration_kg" not in row  # сырое поле не утекает дальше
 
 
-def test_build_upsert_sql_rounds_visceral_and_keeps_coalesce():
-    sql = wt.build_upsert_sql(1, _rows_one({170: (62, -1)}))  # висцеральный 6.2
-    assert ", 6, 'withings')" in sql  # округлён под Integer-колонку
-    assert "COALESCE(EXCLUDED.muscle_mass, weights.muscle_mass)" in sql
+def test_to_api_measurement_has_offset_and_optional_fields():
+    (row,) = _rows_one({6: (33214, -3), 170: (62, -1)})
+    m = wt.to_api_measurement(row)
+    assert m["measured_at"].endswith("+00:00")  # ключ идемпотентности эндпоинта
+    assert m["weight"] == 109.532 and m["body_fat"] == 33.214
+    assert m["visceral_fat"] == 6.2  # не округляем — Integer-колонку сузит сервер
+    assert "muscle_mass" not in m  # отсутствующие поля не шлём (None затёр бы COALESCE)
 
 
-def test_build_upsert_sql_batches_rows():
+def test_push_via_api_batches_and_counts(monkeypatch):
+    monkeypatch.setenv("BOTKIN_PAT", "pat_x")
+    monkeypatch.setattr(wt, "API_BATCH_LIMIT", 2)  # лимит эндпоинта — 500, тут ужимаем
+    monkeypatch.setattr(wt, "get_agent_jwt", lambda pat: "JWT")
+    sent = []
+
+    class _R:
+        status_code = 200
+
+        def json(self):
+            return {"inserted": 2, "updated": 0}
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        sent.append(json)
+        return _R()
+
+    monkeypatch.setattr(wt, "requests", types.SimpleNamespace(post=fake_post))
+    rows = wt.parse_measure_groups(
+        [_grp(1754373000 + i * 600, [{"type": 1, "value": 109000, "unit": -3}]) for i in range(5)]
+    )
+    ins, upd = wt.push_via_api(rows)
+    assert [len(b["measurements"]) for b in sent] == [2, 2, 1]  # батчи по лимиту
+    assert sent[0]["source"] == "withings"
+    assert (ins, upd) == (6, 0)
+
+
+def test_push_via_api_requires_pat(monkeypatch):
+    monkeypatch.delenv("BOTKIN_PAT", raising=False)
+    with pytest.raises(wt.WithingsError, match="BOTKIN_PAT"):
+        wt.push_via_api(_rows_one())
+
+
+def test_push_via_api_raises_on_http_error(monkeypatch):
+    monkeypatch.setenv("BOTKIN_PAT", "pat_x")
+    monkeypatch.setattr(wt, "get_agent_jwt", lambda pat: "JWT")
+
+    class _R:
+        status_code = 422
+        text = "source reserved"
+
+    monkeypatch.setattr(wt, "requests", types.SimpleNamespace(post=lambda *a, **k: _R()))
+    with pytest.raises(wt.WithingsError, match="422"):
+        wt.push_via_api(_rows_one())
+
+
+# ── фильтр чужих замеров (весы общие — дома на них встают другие) ─────────────
+
+
+def test_filter_own_measurements_splits_by_corridor():
     rows = wt.parse_measure_groups(
         [
-            _grp(1754373000, [{"type": 1, "value": 109000, "unit": -3}]),
-            _grp(1754460000, [{"type": 1, "value": 108500, "unit": -3}]),
+            _grp(1754373000, [{"type": 1, "value": 108712, "unit": -3}]),  # владелец
+            _grp(1754373600, [{"type": 1, "value": 65991, "unit": -3}]),  # другой человек
         ]
     )
-    sql = wt.build_upsert_sql(1, rows)
-    assert sql.count("INSERT INTO weights") == 2
+    own, foreign = wt.filter_own_measurements(rows, min_weight=90)
+    assert [r["weight"] for r in own] == [108.712]
+    assert [r["weight"] for r in foreign] == [65.991]
 
 
-def test_build_upsert_sql_empty_rows():
-    assert wt.build_upsert_sql(1, []) == ""
-
-
-def test_push_via_ssh_counts_and_raises(monkeypatch):
-    monkeypatch.setenv("BOTKIN_REMOTE_SSH", "user@example")
-    monkeypatch.setenv("BOTKIN_REMOTE_PSQL", "psql -d db")
-    calls = {}
-
-    def fake_run(cmd, input=None, capture_output=None, text=None):
-        calls["cmd"] = cmd
-        calls["input"] = input
-        return types.SimpleNamespace(returncode=0, stdout="INSERT 0 1\nINSERT 0 1\n", stderr="")
-
-    monkeypatch.setattr(wt, "subprocess", types.SimpleNamespace(run=fake_run))
-    assert wt.push_via_ssh("SQL") == (2, 0)
-    assert "user@example" in calls["cmd"] and calls["input"] == "SQL"
-
-    def fail_run(cmd, input=None, capture_output=None, text=None):
-        return types.SimpleNamespace(returncode=255, stdout="", stderr="ssh: connect refused")
-
-    monkeypatch.setattr(wt, "subprocess", types.SimpleNamespace(run=fail_run))
-    with pytest.raises(wt.WithingsError):
-        wt.push_via_ssh("SQL")
-
-
-def test_push_via_ssh_requires_env(monkeypatch):
-    """Реквизиты инфраструктуры только из .env — без них падаем с понятной ошибкой."""
-    monkeypatch.delenv("BOTKIN_REMOTE_SSH", raising=False)
-    monkeypatch.delenv("BOTKIN_REMOTE_PSQL", raising=False)
-    with pytest.raises(wt.WithingsError, match="BOTKIN_REMOTE_SSH"):
-        wt.push_via_ssh("SQL")
+def test_filter_own_measurements_noop_without_bounds():
+    rows = _rows_one()
+    own, foreign = wt.filter_own_measurements(rows)
+    assert own == rows and foreign == []
 
 
 # ── токены ────────────────────────────────────────────────────────────────────

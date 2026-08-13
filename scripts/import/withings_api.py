@@ -28,8 +28,8 @@ data/cache/withings_tokens.json (env нужен только для первич
 Квирк API: HTTP-код всегда 200, реальный статус — в теле (`status`, 0 = ok).
 
 Использование:
-    # с Мака в прод-БД через ssh+psql (основной путь, как у zepp_csv.py):
-    python scripts/import/withings_api.py --user 836757955 --days 90 --push-remote
+    # основной путь — через Botkin API (нужен BOTKIN_PAT со scope rw):
+    python scripts/import/withings_api.py --user 836757955 --days 90 --push-api --min-weight 90
     # изнутри контейнера / с DATABASE_URL:
     python scripts/import/withings_api.py --user 836757955 --days 90
     python scripts/import/withings_api.py --user 836757955 --dry-run
@@ -39,7 +39,6 @@ import argparse
 import json
 import logging
 import os
-import subprocess
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -71,7 +70,7 @@ MEASURE_TYPES = {
     5: "lean_mass",  # безжировая масса, кг (в weights не пишем, для диагностики)
     6: "body_fat",  # % жира
     76: "muscle_mass",  # кг
-    77: "water",  # кг
+    77: "hydration_kg",  # КИЛОГРАММЫ; в weights.water ожидаются ПРОЦЕНТЫ → пересчёт в parse
     88: "bone_mass",  # кг
     170: "visceral_fat",  # индекс
     226: "bmr",  # основной обмен, ккал (колонки нет — только для --dry-run)
@@ -211,6 +210,10 @@ def parse_measure_groups(groups: list[dict]) -> list[dict]:
 
     Группы без веса отбрасываем: weights.weight NOT NULL, а отдельные группы
     бывают только с пульсом (весы пишут его отдельной группой).
+
+    Вода: Withings отдаёт КИЛОГРАММЫ (hydration), а `weights.water` и поле API —
+    ПРОЦЕНТЫ (так пишет канал HAE, и валидатор эндпоинта ограничивает 0..100).
+    Пересчитываем здесь, в одном месте на оба пути записи.
     """
     rows: list[dict] = []
     for grp in groups:
@@ -221,9 +224,34 @@ def parse_measure_groups(groups: list[dict]) -> list[dict]:
                 row[field] = round(measure_value(measure), 3)
         if "weight" not in row:
             continue
+        hydration = row.pop("hydration_kg", None)
+        if hydration is not None and row["weight"]:
+            row["water"] = round(hydration / row["weight"] * 100, 1)
         row["measured_at"] = datetime.fromtimestamp(grp.get("date", 0), tz=timezone.utc)
         rows.append(row)
     return sorted(rows, key=lambda r: r["measured_at"])
+
+
+def filter_own_measurements(
+    rows: list[dict], min_weight: float | None = None, max_weight: float | None = None
+) -> tuple[list[dict], list[dict]]:
+    """Отсечь замеры других людей. Возвращает (свои, чужие).
+
+    Домашние весы общие: на них встают члены семьи, а Withings относит замер к
+    владельцу аккаунта, если не распознал профиль. Без фильтра чужой вес попадает
+    в историю владельца и ломает тренды/аналитику. Границы задаёт вызывающий —
+    захардкоженный «нормальный вес» в открытом репозитории смысла не имеет.
+    """
+    if min_weight is None and max_weight is None:
+        return rows, []
+    own, foreign = [], []
+    for r in rows:
+        w = r.get("weight")
+        if (min_weight is not None and w < min_weight) or (max_weight is not None and w > max_weight):
+            foreign.append(r)
+        else:
+            own.append(r)
+    return own, foreign
 
 
 # ── Запись в БД ───────────────────────────────────────────────────────────────
@@ -274,71 +302,67 @@ def upsert_rows(cur, user_id: int, rows: list[dict]) -> tuple[int, int]:
     return inserted, updated
 
 
-# Прод-БД не смотрит наружу, поэтому вес с весов исторически льётся с машины
-# владельца через ssh + psql (так же работает scripts/import/zepp_csv.py). Держим
-# тот же путь: импортёр не требует ни деплоя, ни кред Withings на сервере.
-# Адрес хоста и команду psql НЕ хардкодим — репозиторий публичный, реквизиты
-# инфраструктуры живут в .env (он в .gitignore):
-#   BOTKIN_REMOTE_SSH=user@host
-#   BOTKIN_REMOTE_PSQL=docker exec -i <контейнер> psql -U <юзер> -d <база>
-_ENV_SSH = "BOTKIN_REMOTE_SSH"
-_ENV_PSQL = "BOTKIN_REMOTE_PSQL"
+# ── Запись через Botkin API (основной путь) ───────────────────────────────────
+# Прод-БД наружу не смотрит, а раздавать доступ к серверу под импорт весов нельзя:
+# группа docker = root на хосте, а psql-суперюзер умеет COPY ... TO PROGRAM. Поэтому
+# пишем по HTTPS в POST /api/agent/log_body_composition: user_id берётся из токена,
+# RLS изолирует данные, доступ к серверу не нужен вообще.
+API_BASE = os.getenv("BOTKIN_API_BASE", "https://botkin.health")
+API_BATCH_LIMIT = 500  # ограничение эндпоинта на длину measurements[]
 
 
-def _sql_literal(value) -> str:
-    """Число/None → SQL-литерал. Строк из внешних источников здесь нет (только числа)."""
-    return "NULL" if value is None else f"{value}"
+def to_api_measurement(row: dict) -> dict:
+    """Строка парсера → объект measurements[] эндпоинта. Чистая функция.
 
-
-def build_upsert_sql(user_id: int, rows: list[dict]) -> str:
-    """Батч UPSERT-ов для psql. Чистая функция — та же семантика, что у upsert_rows.
-
-    Отдельный путь нужен для запуска с Мака (ssh+psql), где psycopg2 к прод-БД не
-    достаёт. Значения — только числа и таймстамп из API, подстановка безопасна.
+    measured_at обязан нести офсет — это ключ идемпотентности эндпоинта: naive-время
+    Postgres трактует по session TimeZone, и один момент, присланный то с офсетом то
+    без, дал бы два ряда. parse_measure_groups отдаёт tz-aware UTC, поэтому isoformat
+    даёт «+00:00». visceral_fat не округляем — округление под Integer-колонку делает
+    сервер, здесь дробный индекс информативнее.
     """
-    statements = []
-    for r in rows:
-        visceral = round(r["visceral_fat"]) if r.get("visceral_fat") is not None else None
-        statements.append(
-            "INSERT INTO weights "
-            "(user_id, measured_at, weight, body_fat, muscle_mass, water, bone_mass, visceral_fat, source) "
-            f"VALUES ({user_id}, '{r['measured_at'].isoformat()}', "
-            f"{_sql_literal(r.get('weight'))}, {_sql_literal(r.get('body_fat'))}, "
-            f"{_sql_literal(r.get('muscle_mass'))}, {_sql_literal(r.get('water'))}, "
-            f"{_sql_literal(r.get('bone_mass'))}, {_sql_literal(visceral)}, 'withings') "
-            "ON CONFLICT (user_id, measured_at) DO UPDATE SET "
-            "weight = COALESCE(EXCLUDED.weight, weights.weight), "
-            "body_fat = COALESCE(EXCLUDED.body_fat, weights.body_fat), "
-            "muscle_mass = COALESCE(EXCLUDED.muscle_mass, weights.muscle_mass), "
-            "water = COALESCE(EXCLUDED.water, weights.water), "
-            "bone_mass = COALESCE(EXCLUDED.bone_mass, weights.bone_mass), "
-            "visceral_fat = COALESCE(EXCLUDED.visceral_fat, weights.visceral_fat), "
-            "source = EXCLUDED.source;"
+    m = {"measured_at": row["measured_at"].isoformat(), "weight": row["weight"]}
+    for field in ("body_fat", "muscle_mass", "water", "bone_mass", "visceral_fat"):
+        if row.get(field) is not None:
+            m[field] = row[field]
+    return m
+
+
+def get_agent_jwt(pat: str) -> str:
+    """PAT → короткоживущий агентский JWT (единственный публичный эндпоинт API)."""
+    resp = requests.post(f"{API_BASE}/api/agent/exchange_pat_for_jwt", json={"pat": pat}, timeout=30)
+    if resp.status_code != 200:
+        raise WithingsError(f"обмен PAT не удался: {resp.status_code} {resp.text[:200]}")
+    token = resp.json().get("access_token")
+    if not token:
+        raise WithingsError("в ответе обмена нет access_token")
+    return token
+
+
+def push_via_api(rows: list[dict], source: str = "withings") -> tuple[int, int]:
+    """Отправить замеры в Botkin батчами. Возвращает (inserted, updated).
+
+    PAT берём из env BOTKIN_PAT — в код и репозиторий он не попадает.
+    """
+    pat = os.getenv("BOTKIN_PAT", "")
+    if not pat:
+        raise WithingsError("нет BOTKIN_PAT в .env (personal access token Botkin со scope rw)")
+    jwt = get_agent_jwt(pat)
+
+    inserted = updated = 0
+    for i in range(0, len(rows), API_BATCH_LIMIT):
+        chunk = [to_api_measurement(r) for r in rows[i : i + API_BATCH_LIMIT]]
+        resp = requests.post(
+            f"{API_BASE}/api/agent/log_body_composition",
+            headers={"Authorization": f"Bearer {jwt}"},
+            json={"source": source, "measurements": chunk},
+            timeout=120,
         )
-    return "\n".join(statements)
-
-
-def push_via_ssh(sql: str) -> tuple[int, int]:
-    """Прогнать батч через ssh+psql. Возвращает (inserted, updated) по выводу psql.
-
-    Хост и команда psql берутся из .env (в коде не хардкодим — репо публичный).
-    """
-    host = os.getenv(_ENV_SSH, "")
-    psql_cmd = os.getenv(_ENV_PSQL, "")
-    if not (host and psql_cmd):
-        raise WithingsError(f"для --push-remote нужны {_ENV_SSH} и {_ENV_PSQL} в .env")
-    result = subprocess.run(
-        ["ssh", "-o", "StrictHostKeyChecking=no", host, psql_cmd],
-        input=sql,
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        raise WithingsError(f"psql через ssh упал: {result.stderr[:300]}")
-    lines = [ln.strip() for ln in result.stdout.splitlines()]
-    inserted = sum(1 for ln in lines if ln == "INSERT 0 1")
-    # ON CONFLICT DO UPDATE тоже отдаёт «INSERT 0 1», поэтому обновления считаем как остаток
-    return inserted, max(0, len([ln for ln in lines if ln.startswith("INSERT")]) - inserted)
+        if resp.status_code != 200:
+            raise WithingsError(f"log_body_composition: {resp.status_code} {resp.text[:300]}")
+        body = resp.json()
+        inserted += body.get("inserted", 0)
+        updated += body.get("updated", 0)
+    return inserted, updated
 
 
 def sync_user(user_id: int, days: int = 90, db_url: str | None = None) -> dict:
@@ -370,10 +394,16 @@ def main(argv=None):
     parser.add_argument("--db-url", default=os.getenv("DATABASE_URL"), help="PostgreSQL URL")
     parser.add_argument("--dry-run", action="store_true", help="только показать, без записи в БД")
     parser.add_argument(
-        "--push-remote",
+        "--push-api",
         action="store_true",
-        help="писать в прод-БД через ssh+psql (запуск с Мака, как zepp_csv.py) вместо DATABASE_URL",
+        help="писать через Botkin API (HTTPS + BOTKIN_PAT) — основной путь, доступ к серверу не нужен",
     )
+    parser.add_argument(
+        "--min-weight",
+        type=float,
+        help="отсечь замеры легче N кг (домашние весы общие — на них встают домашние)",
+    )
+    parser.add_argument("--max-weight", type=float, help="отсечь замеры тяжелее N кг")
     args = parser.parse_args(argv)
 
     print("⚖️  Withings — импорт веса и состава тела...")
@@ -381,6 +411,12 @@ def main(argv=None):
     start_ts = int((datetime.now(tz=timezone.utc) - timedelta(days=args.days)).timestamp())
     rows = parse_measure_groups(fetch_measure_groups(get_access_token(), start_ts, end_ts))
     print(f"   Замеров получено: {len(rows)} за {args.days} дн.")
+
+    rows, foreign = filter_own_measurements(rows, args.min_weight, args.max_weight)
+    for r in foreign:
+        print(f"   ⏭️  вне коридора веса (не владелец?): {r['measured_at']:%d.%m %H:%M} — {r['weight']} кг")
+    if foreign:
+        print(f"   Отфильтровано чужих замеров: {len(foreign)}")
 
     if args.dry_run:
         for r in rows[-5:]:
@@ -394,9 +430,9 @@ def main(argv=None):
         print("   (BMR не пишется — колонки в weights нет)")
         return 0
 
-    if args.push_remote:
-        ins, upd = push_via_ssh(build_upsert_sql(args.user, rows))
-        print(f"✅ Готово (ssh+psql): {ins} новых, {upd} обновлено (user {args.user})")
+    if args.push_api:
+        ins, upd = push_via_api(rows)
+        print(f"✅ Готово (Botkin API): {ins} новых, {upd} обновлено")
         return 0
 
     if not args.db_url:
