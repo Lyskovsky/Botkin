@@ -65,6 +65,36 @@ else
 fi
 $PY scripts/import/zepp_csv.py 2>/dev/null || true
 
+echo "1.85/4 ⚖️  Полный состав тела с весов Withings (мышцы/вода/кости/висцеральный)..."
+# Зачем отдельно от Apple Health: в HealthKit НЕТ типов для мышечной массы, воды,
+# костной массы и висцерального жира — через HAE доходят только вес, % жира и
+# безжировая масса. Пишем через POST /api/agent/log_body_composition (HTTPS + PAT):
+# доступ к серверу не нужен, апсерт идемпотентный, COALESCE не перетирает HAE.
+#
+# Требуется в .env: BOTKIN_PAT (scope rw). WITHINGS_TOKENS_PATH — общий токен-файл
+# с локальным Withings-MCP, чтобы не плодить второе приложение и не ротировать
+# токен вразнобой. WITHINGS_MIN_WEIGHT — весы домашние общие: на них встают другие
+# члены семьи, а Withings относит нераспознанный замер к владельцу аккаунта.
+# Шаг необязательный: нет кред — молча пропускаем, вес всё равно придёт через HAE.
+# .env читает python (load_dotenv), а bash о нём не знает — вытаскиваем только
+# факт наличия PAT, чтобы решить, включён ли шаг. Значение никуда не печатаем.
+if [ -z "$BOTKIN_PAT" ] && [ -f .env ]; then
+    BOTKIN_PAT=$(grep -E '^BOTKIN_PAT=' .env | head -1 | cut -d= -f2- | tr -d '"'"'"' ')
+fi
+if [ -n "$BOTKIN_PAT" ]; then
+    # --min-weight берётся из WITHINGS_MIN_WEIGHT в .env самим скриптом
+    WITHINGS_OUT=$($PY scripts/import/withings_api.py \
+        --user "${BOTKIN_USER_ID:-836757955}" --days "${WITHINGS_SYNC_DAYS:-30}" --push-api 2>&1)
+    if [ $? -eq 0 ]; then
+        echo "$WITHINGS_OUT" | tail -3
+    else
+        echo "   ℹ️  Withings пропущен (API/токен недоступен) — вес всё равно придёт через HAE"
+        echo "$WITHINGS_OUT" | tail -2
+    fi
+else
+    echo "   ℹ️  Withings пропущен: нет BOTKIN_PAT в .env"
+fi
+
 echo "1.9/4 🍷 Обновление alcohol_daily.json из nutrition_log..."
 $PY scripts/import/sync_alcohol.py
 

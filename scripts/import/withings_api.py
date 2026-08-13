@@ -387,6 +387,18 @@ def sync_user(user_id: int, days: int = 90, db_url: str | None = None) -> dict:
     return {"user_id": user_id, "rows": len(rows), "inserted": ins, "updated": upd}
 
 
+def _env_float(name: str) -> float | None:
+    """Число из env или None. Мусорное значение не роняет импорт — просто игнорим."""
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning("%s=%r не число — игнорирую", name, raw)
+        return None
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Импорт состава тела Withings → PostgreSQL")
     parser.add_argument("--user", type=int, required=True, help="telegram_id пользователя")
@@ -398,12 +410,16 @@ def main(argv=None):
         action="store_true",
         help="писать через Botkin API (HTTPS + BOTKIN_PAT) — основной путь, доступ к серверу не нужен",
     )
+    # Дефолты из .env — чтобы ночной синк не тащил границы через аргументы шелла
     parser.add_argument(
         "--min-weight",
         type=float,
-        help="отсечь замеры легче N кг (домашние весы общие — на них встают домашние)",
+        default=_env_float("WITHINGS_MIN_WEIGHT"),
+        help="отсечь замеры легче N кг (весы дома общие — на них встают другие члены семьи)",
     )
-    parser.add_argument("--max-weight", type=float, help="отсечь замеры тяжелее N кг")
+    parser.add_argument(
+        "--max-weight", type=float, default=_env_float("WITHINGS_MAX_WEIGHT"), help="отсечь замеры тяжелее N кг"
+    )
     args = parser.parse_args(argv)
 
     print("⚖️  Withings — импорт веса и состава тела...")
