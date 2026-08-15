@@ -245,10 +245,19 @@ async def cmd_cancel(message: Message, state: FSMContext) -> None:
 
 
 @router.message(DocUpload.waiting, F.document | F.photo)
-async def doc_received(message: Message, state: FSMContext) -> None:
+async def doc_received(message: Message, state: FSMContext, album: list = None) -> None:
     """Обрабатывает входящий файл в режиме /doc."""
     from core.health.doc_extractor import extract_medical_data
     from handlers.photo import _extract_pdf_text, _pdf_to_images
+
+    # Альбом (несколько файлов одним сообщением) — пока не поддерживаем батч-обработку
+    # в /doc (FSM-state pending хранит один файл). Просим прислать по одному, вместо
+    # того чтобы молча обработать только первый файл и потерять остальные.
+    if album and len(album) > 1:
+        await message.answer(
+            "📎 Пришли, пожалуйста, документы по одному — так надёжнее, я смогу их правильно распознать."
+        )
+        return
 
     user_id = message.from_user.id
 

@@ -514,6 +514,33 @@ def test_edit_meal_tool_registered():
     assert "lunch" in props["new_slot"]["enum"]
 
 
+# ── get_recent_meals days guard (#183) ─────────────────────────────────────────
+
+
+def test_recent_meals_days_guard_in_meta_prompt(agent_db, monkeypatch):
+    """#183: system-prompt содержит guard — НАЧИНАТЬ с days=2, не days=1.
+    Пользователи пишут утром про вчерашнюю еду — days=1 даёт пустой список."""
+    fake = FakeRequests([_anthropic_text("сейчас проверю")])
+    monkeypatch.setattr(agent_chat, "requests", fake)
+
+    agent_chat.ask_agent(895655, "за мой боул ещё числится как перекус")
+
+    sys_text = " ".join(b["text"] for b in fake.anthropic_calls[0]["payload"]["system"])
+    # guard должен запрещать начинать с days=1 при контекстных вопросах
+    assert "days=2" in sys_text
+    assert "days=3" in sys_text  # fallback при пустом ответе
+
+
+def test_addendum_tool_description_uses_days2():
+    """#183: описание инструмента log_meal_text НЕ предписывает days=1 для addendum."""
+    log_meal_tool = next(t for t in agent_chat.TOOLS if t["name"] == "log_meal_text")
+    description = log_meal_tool["description"]
+    # days=1 не должен быть в addendum-инструкции (было до фикса)
+    assert "get_recent_meals(days=1)" not in description
+    # days=2 должен быть — именно столько нужно для захвата вчерашних записей
+    assert "get_recent_meals(days=2)" in description
+
+
 def test_compact_mode_food_key_priority():
     """Compact-режим recent_meals читает ключ 'food' для composite items (прецедент 19.06.2026)."""
     composite_item = {"food": "Боул с киноа, креветками и авокадо", "calories": 511, "protein": 40}
