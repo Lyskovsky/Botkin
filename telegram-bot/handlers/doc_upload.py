@@ -225,6 +225,35 @@ def _save_to_blood_tests(user_id: int, extracted: dict[str, Any], stored_name: s
     return f"\n📊 {verb} в динамику показателей: {result.marker_count} (дата анализа: {result.row['test_date']})."
 
 
+def archive_photo_as_document(user_id: int, photo_path: Path, reason: str = "") -> str:
+    """Сохраняет уже скачанное фото как документ профиля без парсинга.
+
+    Для случаев когда LLM-vision не распознал фото ни как еду/вес/добавки/АД,
+    и пользователь не через /doc его прислал — раньше файл просто терялся,
+    а BotkinClaw мог только посоветовать /doc (issue #370). Теперь фото
+    архивируется сразу, без дополнительного действия пользователя.
+
+    Возвращает stored_name сохранённого файла.
+    """
+    content = photo_path.read_bytes()
+    ext = photo_path.suffix or ".jpg"
+    stored_name = _stored_name(content, ext)
+    final_path = _uploads_dir(user_id) / stored_name
+    final_path.write_bytes(content)
+
+    entry: dict[str, Any] = {
+        "added_at": date.today().isoformat(),
+        "file": stored_name,
+        "extracted": {},
+        "user_confirmed": False,
+        "auto_archived": True,
+    }
+    if reason:
+        entry["reason"] = reason
+    append_document_to_kb(user_id, entry)
+    return stored_name
+
+
 @router.message(Command("doc"))
 async def cmd_doc(message: Message, state: FSMContext) -> None:
     """/doc — начать загрузку медицинского документа."""

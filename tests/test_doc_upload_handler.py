@@ -113,6 +113,36 @@ def test_append_document_to_kb_preserves_sections(tmp_path, monkeypatch):
     assert len(data["documents"]) == 1
 
 
+def test_archive_photo_as_document_saves_file_and_kb_entry(tmp_path, monkeypatch):
+    """Фото сохраняется в uploads/ и попадает в documents[] с auto_archived=True.
+
+    Issue #370: пользователь прислал фото документа (не еда/анализ), раньше
+    оно просто терялось. Теперь сохраняется без действий пользователя.
+    """
+    import handlers.doc_upload as mod
+
+    monkeypatch.setattr(mod, "_PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(mod, "_UPLOADS_DIR", tmp_path / "data" / "uploads")
+
+    photo_path = tmp_path / "incoming.jpg"
+    photo_path.write_bytes(b"fake-jpeg-bytes")
+
+    stored_name = mod.archive_photo_as_document(12345, photo_path, reason="не распознано как еда")
+
+    saved_file = tmp_path / "data" / "uploads" / "12345" / stored_name
+    assert saved_file.exists()
+    assert saved_file.read_bytes() == b"fake-jpeg-bytes"
+
+    kb_path = tmp_path / "data" / "kb" / "kb_12345.json"
+    data = json.loads(kb_path.read_text(encoding="utf-8"))
+    assert len(data["documents"]) == 1
+    doc_entry = data["documents"][0]
+    assert doc_entry["file"] == stored_name
+    assert doc_entry["auto_archived"] is True
+    assert doc_entry["user_confirmed"] is False
+    assert doc_entry["reason"] == "не распознано как еда"
+
+
 def test_preview_shows_allergies_new_vs_existing():
     from handlers.doc_upload import _preview_text
 
