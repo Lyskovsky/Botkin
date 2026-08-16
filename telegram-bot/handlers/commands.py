@@ -209,6 +209,10 @@ async def cmd_day(message: Message, user_id: int):
         # подписываем это явно, чтобы цифра не расходилась с (BMR+ср.актив)×0.85.
         is_past_day = today_date < real_today
         goal_suffix = " от факта дня" if (is_past_day and not stats.get("data_incomplete")) else ""
+        # Адаптивный TDEE (питание+вес): подписываем источник, чтобы было видно,
+        # что цель посчитана по собственным данным, а не по оценке девайса.
+        if targets.get("tdee_source") == "adaptive" and targets.get("tdee_days"):
+            goal_suffix += f" · по вашим данным за {targets['tdee_days']} дн."
         if avg_total > 1500:
             if garmin_error:
                 active_line = f"🏃 ⚠️ Garmin недоступен · {avg_active} в среднем"
@@ -221,7 +225,8 @@ async def cmd_day(message: Message, user_id: int):
             )
         else:
             energy_line = (
-                f"🏃 {today_active_r} ккал — активность сегодня\n🎯 {target_cal} ккал — цель (дефицит −{deficit_pct}%)"
+                f"🏃 {today_active_r} ккал — активность сегодня\n"
+                f"🎯 {target_cal} ккал — цель (дефицит −{deficit_pct}%{goal_suffix})"
             )
 
         # --- Calorie bar ---

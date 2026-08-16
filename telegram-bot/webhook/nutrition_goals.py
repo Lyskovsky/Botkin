@@ -47,6 +47,10 @@ def compute_goals(user_id: int, for_date: Optional[date_type] = None) -> dict:
         "tdee": tdee,
         "calorie_goal_pct": goal_pct,
         "deficit_pct": goal_pct,  # signed; mini-app formats sign itself
+        # 'adaptive' — TDEE выведен из питания+веса пользователя (подпись
+        # «по вашим данным за N дней» в миниаппе); иначе garmin/apple/manual/default.
+        "tdee_source": budget.get("bmr_source"),
+        "tdee_days": budget.get("tdee_days"),
         # Прошедший день с частичным Garmin-синком: цель оценочная, «перебор» не выносить.
         "data_incomplete": budget.get("data_incomplete", False),
     }

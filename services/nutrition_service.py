@@ -58,6 +58,14 @@ class NutritionService:
             # Get average activity stats for targets calculation
             user = get_user_by_telegram_id(db, self.user_id)
             data_incomplete = False
+
+            # Адаптивный TDEE из питания+веса — приоритетнее девайсов (см.
+            # core/health/adaptive_tdee.py). None если данных мало — тогда
+            # calculate_targets идёт по старой цепочке user/stats/fallback.
+            from core.health.adaptive_tdee import get_adaptive_tdee
+
+            adaptive = get_adaptive_tdee(self.user_id, as_of=day, db=db)
+            adaptive_val = adaptive["tdee"] if adaptive else None
             try:
                 avg_stats = get_average_activity_stats(db, self.user_id, days=14)
                 from core.health.caloric_budget import get_day_actual_tdee, get_day_energy_fact
@@ -73,20 +81,30 @@ class NutritionService:
                     fact = get_day_energy_fact(self.user_id, day, avg_bmr=avg_bmr, db=db)
                     if fact["tdee"] and not fact["incomplete"]:
                         targets_dict = calculate_targets(
-                            stats=avg_stats, user=user, today_tdee=fact["tdee"], today_tdee_final=True
+                            stats=avg_stats,
+                            user=user,
+                            today_tdee=fact["tdee"],
+                            today_tdee_final=True,
+                            adaptive_tdee=adaptive_val,
                         )
                     else:
                         data_incomplete = True
-                        targets_dict = calculate_targets(stats=avg_stats, user=user)
+                        targets_dict = calculate_targets(stats=avg_stats, user=user, adaptive_tdee=adaptive_val)
                 else:
                     # Сегодня: прогноз. Today-boost = max(14-дн среднее, факт на сейчас) —
                     # день не закончен, честнее не посчитать (см. calculate_targets).
                     today_tdee = get_day_actual_tdee(self.user_id, day, db=db)
                     logger.info(f"[day_stats] user_id={self.user_id} avg_stats={avg_stats} today_tdee={today_tdee}")
-                    targets_dict = calculate_targets(stats=avg_stats, user=user, today_tdee=today_tdee)
+                    targets_dict = calculate_targets(
+                        stats=avg_stats, user=user, today_tdee=today_tdee, adaptive_tdee=adaptive_val
+                    )
             except Exception as e:
                 logger.error(f"Error calculating targets: {e}", exc_info=True)
-                targets_dict = calculate_targets(stats=None, user=user)
+                targets_dict = calculate_targets(stats=None, user=user, adaptive_tdee=adaptive_val)
+
+            # Источник TDEE для подписи в UI («по вашим данным за N дней»)
+            targets_dict["tdee_source"] = "adaptive" if adaptive_val else None
+            targets_dict["tdee_days"] = adaptive["days_used"] if adaptive else None
 
             # Calculate remaining
             remaining = {

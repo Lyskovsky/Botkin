@@ -34,10 +34,15 @@ def calculate_targets(
     user: Any = None,
     today_tdee: Optional[float] = None,
     today_tdee_final: bool = False,
+    adaptive_tdee: Optional[float] = None,
 ) -> Dict:
     """
     Рассчитывает целевые калории и макросы.
-    Источники TDEE: user.bmr+user.avg_active > stats/avg_tdee > fallback.
+    Источники TDEE: adaptive_tdee > user.bmr+user.avg_active > stats/avg_tdee > fallback.
+
+    adaptive_tdee: maintenance, выведенный из собственных данных питания и веса
+        (core/health/adaptive_tdee.py, метод MacroFactor). Приоритетнее девайсов
+        и ручных настроек: закрывает энергобаланс по факту, а не по оценке.
 
     today_tdee: фактический расход (BMR+активные) за конкретный день из Garmin.
         Если он выше базового (среднего/ручного) — берётся он. Это «пол по среднему»:
@@ -66,8 +71,12 @@ def calculate_targets(
 
     estimated_tdee = 0.0
 
+    # 0. Адаптивный TDEE из питания+веса — самый честный источник
+    if adaptive_tdee and adaptive_tdee > 1200:
+        estimated_tdee = float(adaptive_tdee)
+        logger.info(f"[targets] TDEE адаптивный (питание+вес): {estimated_tdee:.0f}")
     # 1. Ручные настройки пользователя (BMR + активные)
-    if user and getattr(user, "bmr", None) and user.bmr and user.bmr > 500:
+    elif user and getattr(user, "bmr", None) and user.bmr and user.bmr > 500:
         bmr_val = float(user.bmr)
         active_val = (
             float(user.avg_active_calories or 0)
