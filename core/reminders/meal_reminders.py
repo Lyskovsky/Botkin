@@ -27,8 +27,8 @@ DEFAULT_GRACE_MINUTES = 120
 
 @dataclass(frozen=True)
 class DueSlot:
-    label: str          # "Завтрак"
-    time_str: str       # "11:00"
+    label: str  # "Завтрак"
+    time_str: str  # "11:00"
 
 
 def parse_hhmm(value: str) -> time:
@@ -83,9 +83,7 @@ def due_slots(
         if last_sent.get(label) == today_iso:
             continue
         slot_t = parse_hhmm(hhmm)
-        slot_dt = now_local.replace(
-            hour=slot_t.hour, minute=slot_t.minute, second=0, microsecond=0
-        )
+        slot_dt = now_local.replace(hour=slot_t.hour, minute=slot_t.minute, second=0, microsecond=0)
         minutes_since = (now_local - slot_dt).total_seconds() / 60.0
         if 0 <= minutes_since <= grace_minutes:
             result.append(DueSlot(label=label, time_str=hhmm))
@@ -97,6 +95,5 @@ def build_reminder_text(label: str) -> str:
     """Мягкий пинг под конкретный слот."""
     meal = label.lower()
     return (
-        f"🍽 Напоминание: не забудьте залогировать {meal}.\n"
-        f"Пришлите фото блюда или опишите текстом — я посчитаю КБЖУ."
+        f"🍽 Напоминание: не забудьте залогировать {meal}.\nПришлите фото блюда или опишите текстом — я посчитаю КБЖУ."
     )

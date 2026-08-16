@@ -19,7 +19,7 @@ from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
 revision: str = "meal0remind01"
-down_revision: Union[str, None] = "food0inter01"
+down_revision: Union[str, None] = "funnel0evt01"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

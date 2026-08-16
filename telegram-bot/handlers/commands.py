@@ -952,7 +952,7 @@ async def cmd_meal_reminders(message: Message, user_id: int):
 
     parts = (message.text or "").split()
     args = parts[1:]
-    sub = (args[0].lower() if args else "status")
+    sub = args[0].lower() if args else "status"
 
     db = SessionLocal()
     try:

@@ -48,9 +48,9 @@ logger = logging.getLogger("send_reminders")
 
 TELEGRAM_API_BASE = "https://api.telegram.org"
 REQUEST_TIMEOUT = 15
-SUPPLEMENT_KEY = "__supplement__"   # ключ дедупа добавок внутри meal_reminder_last_sent
-SUPPLEMENT_WINDOW_MIN = 120         # окно после supplement_reminder_time
-LOGGED_PRE_MINUTES = 90             # «приём залогирован», если запись в [slot-90, slot+grace]
+SUPPLEMENT_KEY = "__supplement__"  # ключ дедупа добавок внутри meal_reminder_last_sent
+SUPPLEMENT_WINDOW_MIN = 120  # окно после supplement_reminder_time
+LOGGED_PRE_MINUTES = 90  # «приём залогирован», если запись в [slot-90, slot+grace]
 
 
 def _send(token: str, chat_id: int, text: str, dry: bool) -> bool:
@@ -68,11 +68,7 @@ def _send(token: str, chat_id: int, text: str, dry: bool) -> bool:
 
 def _logged_labels(db, NutritionLog, uid, today, tz, meal_times, grace=DEFAULT_GRACE_MINUTES):
     """Метки слотов, для которых приём уже залогирован рядом по времени → не напоминаем."""
-    logs = (
-        db.query(NutritionLog)
-        .filter(NutritionLog.user_id == uid, NutritionLog.date == today)
-        .all()
-    )
+    logs = db.query(NutritionLog).filter(NutritionLog.user_id == uid, NutritionLog.date == today).all()
     logged_minutes: list[int] = []
     for lg in logs:
         if lg.meal_time is not None:
@@ -105,8 +101,7 @@ def run(dry: bool = False) -> int:
             db.query(UserSettings, User)
             .join(User, User.telegram_id == UserSettings.user_id)
             .filter(
-                (UserSettings.meal_reminders_enabled.is_(True))
-                | (UserSettings.supplement_reminders_enabled.is_(True))
+                (UserSettings.meal_reminders_enabled.is_(True)) | (UserSettings.supplement_reminders_enabled.is_(True))
             )
             .all()
         )
@@ -161,9 +156,7 @@ def run(dry: bool = False) -> int:
 
 
 def main() -> int:
-    logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
-    )
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     parser = argparse.ArgumentParser(description="Диспетчер напоминаний еда+добавки")
     parser.add_argument("--dry-run", action="store_true", help="ничего не отправлять, только логировать")
     args = parser.parse_args()
