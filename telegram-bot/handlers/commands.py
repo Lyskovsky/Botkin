@@ -934,3 +934,84 @@ async def cmd_whoop(message: Message, user_id: int):
         parse_mode="HTML",
         reply_markup=keyboard,
     )
+
+
+@router.message(Command("meal_reminders"))
+async def cmd_meal_reminders(message: Message, user_id: int):
+    """/meal_reminders — напоминания логировать еду.
+
+    /meal_reminders            — показать текущие настройки
+    /meal_reminders on         — включить (дефолт: Завтрак 11:00, Обед 14:30, Ужин 22:00)
+    /meal_reminders off        — выключить
+    /meal_reminders times 11:00 14:30 22:00  — задать времена (Завтрак, Обед, Ужин)
+    """
+    from database import SessionLocal
+    from database.crud import ensure_user_exists
+    from database.models import UserSettings
+    from core.reminders.meal_reminders import DEFAULT_MEAL_TIMES, normalize_times, parse_hhmm
+
+    parts = (message.text or "").split()
+    args = parts[1:]
+    sub = args[0].lower() if args else "status"
+
+    db = SessionLocal()
+    try:
+        ensure_user_exists(db, telegram_id=user_id)
+        settings = db.get(UserSettings, user_id)
+        if settings is None:
+            settings = UserSettings(user_id=user_id)
+            db.add(settings)
+
+        if sub in ("on", "вкл"):
+            settings.meal_reminders_enabled = True
+            if not normalize_times(settings.meal_reminder_times or {}):
+                settings.meal_reminder_times = dict(DEFAULT_MEAL_TIMES)
+            db.commit()
+            times = normalize_times(settings.meal_reminder_times or {})
+            pretty = ", ".join(f"{k} {v}" for k, v in times.items())
+            await message.answer(f"✅ Напоминания о еде включены.\nВремена: {pretty}")
+            return
+
+        if sub in ("off", "выкл"):
+            settings.meal_reminders_enabled = False
+            db.commit()
+            await message.answer("🔕 Напоминания о еде выключены.")
+            return
+
+        if sub in ("times", "время"):
+            vals = args[1:]
+            if not vals:
+                await message.answer("Укажите времена, например: /meal_reminders times 11:00 14:30 22:00")
+                return
+            labels = list(DEFAULT_MEAL_TIMES.keys())  # Завтрак, Обед, Ужин
+            new_times: dict[str, str] = {}
+            try:
+                for i, v in enumerate(vals):
+                    t = parse_hhmm(v)
+                    label = labels[i] if i < len(labels) else f"Приём {i + 1}"
+                    new_times[label] = f"{t.hour:02d}:{t.minute:02d}"
+            except ValueError:
+                await message.answer("❌ Время в формате HH:MM, например 11:00. Попробуйте снова.")
+                return
+            settings.meal_reminder_times = new_times
+            settings.meal_reminders_enabled = True
+            db.commit()
+            pretty = ", ".join(f"{k} {v}" for k, v in new_times.items())
+            await message.answer(f"✅ Времена напоминаний обновлены: {pretty}")
+            return
+
+        # status (по умолчанию)
+        on = bool(settings.meal_reminders_enabled)
+        times = normalize_times(settings.meal_reminder_times or {})
+        if times:
+            pretty = ", ".join(f"{k} {v}" for k, v in times.items())
+        else:
+            pretty = "не заданы"
+        state = "включены ✅" if on else "выключены 🔕"
+        await message.answer(
+            f"🍽 Напоминания о еде: {state}\n"
+            f"Времена: {pretty}\n\n"
+            f"Команды: /meal_reminders on | off | times 11:00 14:30 22:00"
+        )
+    finally:
+        db.close()

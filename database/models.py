@@ -363,6 +363,12 @@ class UserSettings(Base):
     feedback_opt_out: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     supplement_reminder_time: Mapped[time] = mapped_column(Time, server_default="08:00:00")
     supplements: Mapped[list] = mapped_column(JSONBCompat, default=list, server_default="[]")
+    # Meal-logging reminders (opt-in). Fixed daily slots in the user's local timezone.
+    #   meal_reminder_times:    {"Завтрак": "11:00", "Обед": "14:30", "Ужин": "22:00"}  (label -> "HH:MM")
+    #   meal_reminder_last_sent:{"Завтрак": "2026-06-28", ...}  (label -> ISO date, idempotency per slot/day)
+    meal_reminders_enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    meal_reminder_times: Mapped[dict] = mapped_column(JSONBCompat, default=dict, server_default="{}")
+    meal_reminder_last_sent: Mapped[dict] = mapped_column(JSONBCompat, default=dict, server_default="{}")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
