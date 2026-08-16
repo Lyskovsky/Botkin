@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-Генерирует telegram-bot/biomarkers_895655.json из knowledge_base.json Александра.
+Генерирует telegram-bot/biomarkers_<telegram_id>.json из knowledge_base.json владельца.
 
 Debug-инструмент: дашборд читает биомаркеры из Postgres, файл нужен только для
 локальной отладки. Канонический синк KB → сервер:
     python3 scripts/sync_user_health.py --user <telegram_id> --apply
 
 Usage:
-    python3 scripts/generate_biomarkers_json.py
+    BOTKIN_USER_ID=<telegram_id> BOTKIN_KB_FOLDER="<Папка — Здоровье>" \
+        python3 scripts/generate_biomarkers_json.py
 """
 
 from __future__ import annotations
@@ -19,10 +20,15 @@ import subprocess
 import sys
 from pathlib import Path
 
-KB_PATH = Path.home() / (
-    "Library/CloudStorage/GoogleDrive-lyskovsky@gmail.com/Мой диск/FamilyHealth/Александр Лысковский — Здоровье/knowledge_base.json"
+# Владелец задаётся через env — ФИО и telegram_id не хардкодятся в публичном репо (#303).
+USER_ID = os.getenv("BOTKIN_USER_ID") or os.getenv("HEALTHVAULT_USER_ID") or ""
+KB_FOLDER = os.getenv("BOTKIN_KB_FOLDER", "")
+FAMILY_ROOT = Path(
+    os.getenv("BOTKIN_FAMILY_HEALTH_DIR") or (Path.home() / "Library/CloudStorage/GoogleDrive/Мой диск/FamilyHealth")
 )
-OUT_PATH = Path(__file__).resolve().parent.parent / "telegram-bot" / "biomarkers_895655.json"
+
+KB_PATH = FAMILY_ROOT / KB_FOLDER / "knowledge_base.json"
+OUT_PATH = Path(__file__).resolve().parent.parent / "telegram-bot" / f"biomarkers_{USER_ID}.json"
 
 SERVER = "root@116.203.213.137"
 SSH_OPTS = ["-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10"]
@@ -65,6 +71,13 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--deploy", action="store_true", help="Deploy to server after generating")
     args = parser.parse_args()
+
+    if not USER_ID or not KB_FOLDER:
+        sys.exit(
+            "❌ Не заданы BOTKIN_USER_ID и/или BOTKIN_KB_FOLDER.\n"
+            '   Пример: BOTKIN_USER_ID=123456789 BOTKIN_KB_FOLDER="Имя — Здоровье" \\\n'
+            "            python3 scripts/generate_biomarkers_json.py"
+        )
 
     print(f"📖 Reading {KB_PATH}")
     kb = json.loads(KB_PATH.read_text())

@@ -13,7 +13,7 @@ Why: agent_tools_api.get_recent_biomarkers reads from this table; KB
 itself isn't accessible from Hetzner. This script bridges that gap.
 
 Usage:
-    python3 scripts/import/kb_to_blood_tests.py --user-id 895655 --folder "Александр Лысковский — Здоровье"
+    python3 scripts/import/kb_to_blood_tests.py --user-id <telegram_id> --folder "<Имя> — Здоровье"
     python3 scripts/import/kb_to_blood_tests.py --all  # sync all FamilyHealth users with users.kb_folder set
 
 Idempotent — safe to run repeatedly. New analyses are added, existing ones

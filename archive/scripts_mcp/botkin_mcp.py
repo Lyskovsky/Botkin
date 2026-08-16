@@ -70,16 +70,15 @@ def read_knowledge_base(person: str = "Александр") -> str:
 
 
 @mcp.tool()
-def query_nutrition(days: int = 7, user: str = "Александр") -> str:
+def query_nutrition(days: int = 7, user: str = "owner") -> str:
     """
     Получает данные о питании и добавках из PostgreSQL (SSH на сервер).
     days: за сколько последних дней (по умолчанию 7).
-    user: Александр (895655) или второй пользователь (env HV_SECOND_USER_ID).
+    user: "owner" (env BOTKIN_USER_ID) или второй пользователь (env HV_SECOND_USER_ID).
     Возвращает JSON с записями питания и добавками.
     """
-    user_id = (
-        895655 if "александр" in user.lower() or "саша" in user.lower() else int(os.getenv("HV_SECOND_USER_ID", "0"))
-    )
+    owner_id = int(os.getenv("BOTKIN_USER_ID") or os.getenv("HEALTHVAULT_USER_ID") or 0)
+    user_id = owner_id if user.lower() in ("owner", "владелец") else int(os.getenv("HV_SECOND_USER_ID", "0"))
     since = (date.today() - timedelta(days=days)).isoformat()
 
     nutrition_sql = (

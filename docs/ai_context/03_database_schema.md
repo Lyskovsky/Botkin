@@ -38,7 +38,7 @@ ssh root@116.203.213.137 \
 from database import SessionLocal
 db = SessionLocal()
 try:
-    user = db.query(User).filter(User.telegram_id == 895655).first()
+    user = db.query(User).filter(User.telegram_id == OWNER_ID).first()
 finally:
     db.close()
 ```
@@ -51,7 +51,7 @@ finally:
 
 | `telegram_id` | Кто | Роль |
 |---|---|---|
-| **895655** | Александр (владелец) | основной user, на нём проверять всё |
+| `BOTKIN_USER_ID` (env) | owner | основной user, на нём проверять всё |
 | REDACTED_ID | user_2 | второй пользователь |
 | <telegram_id> | early_user | реальные данные |
 
@@ -85,7 +85,7 @@ class User(Base):
     garmin_password: str?
 
     # Manual targets для пользователей без Garmin
-    bmr: float?                  # 1750 для Александра
+    bmr: float?                  # напр. 1750 у владельца
     avg_active_calories: float?
     target_weight_kg: float?
 ```
@@ -205,7 +205,7 @@ SELECT
   ROUND(SUM((totals->>'carbs')::numeric),   1)   AS carbs,
   ROUND(SUM(COALESCE((totals->>'fiber')::numeric, 0)), 1) AS fiber
 FROM nutrition_log
-WHERE user_id = 895655
+WHERE user_id = <owner_id>
   AND date >= '2026-01-01'
 GROUP BY date
 ORDER BY date DESC;
@@ -357,12 +357,12 @@ class BodyMeasurement(Base):
 
 ## Часто используемые SQL-сниппеты
 
-### Сколько калорий ел Александр за последние 30 дней
+### Сколько калорий ел владелец за последние 30 дней
 ```sql
 SELECT date,
        ROUND(SUM((totals->>'calories')::numeric)) AS kcal
 FROM nutrition_log
-WHERE user_id = 895655 AND date >= CURRENT_DATE - INTERVAL '30 days'
+WHERE user_id = <owner_id> AND date >= CURRENT_DATE - INTERVAL '30 days'
 GROUP BY date ORDER BY date DESC;
 ```
 
@@ -370,7 +370,7 @@ GROUP BY date ORDER BY date DESC;
 ```sql
 SELECT supplement_name, time
 FROM supplements_log
-WHERE user_id = 895655 AND date = CURRENT_DATE
+WHERE user_id = <owner_id> AND date = CURRENT_DATE
 ORDER BY time;
 ```
 
@@ -380,7 +380,7 @@ WITH days AS (
   SELECT generate_series(CURRENT_DATE - INTERVAL '30 days', CURRENT_DATE, '1 day'::interval)::date AS d
 )
 SELECT d FROM days
-WHERE d NOT IN (SELECT date FROM nutrition_log WHERE user_id = 895655)
+WHERE d NOT IN (SELECT date FROM nutrition_log WHERE user_id = <owner_id>)
 ORDER BY d;
 ```
 
@@ -390,7 +390,7 @@ SELECT
   COALESCE(it->>'food', it->>'product', it->>'name') AS name,
   COUNT(*) AS times
 FROM nutrition_log n, LATERAL jsonb_array_elements(n.items) it
-WHERE n.user_id = 895655 AND n.date >= CURRENT_DATE - INTERVAL '90 days'
+WHERE n.user_id = <owner_id> AND n.date >= CURRENT_DATE - INTERVAL '90 days'
 GROUP BY name ORDER BY times DESC LIMIT 20;
 ```
 
@@ -398,7 +398,7 @@ GROUP BY name ORDER BY times DESC LIMIT 20;
 ```sql
 SELECT n.id, n.date, n.meal_name, it
 FROM nutrition_log n, LATERAL jsonb_array_elements(n.items) it
-WHERE n.user_id = 895655
+WHERE n.user_id = <owner_id>
   AND COALESCE(it->>'amount', it->>'weight_g', it->>'weight') IS NULL
   AND COALESCE((it->>'calories')::numeric, 0) > 0;
 ```
