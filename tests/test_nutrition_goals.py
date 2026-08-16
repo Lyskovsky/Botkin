@@ -34,6 +34,10 @@ def test_compute_goals_full_budget():
         "tdee": 2000,  # bmr(1650) + activity_avg(350) since tdee_avg not in budget
         "calorie_goal_pct": -15,
         "deficit_pct": -15,
+        # Источник TDEE (adaptive/garmin/…) и число дней адаптивной оценки —
+        # в этом бюджете их нет, прокидывается None.
+        "tdee_source": None,
+        "tdee_days": None,
         "data_incomplete": False,
     }
 

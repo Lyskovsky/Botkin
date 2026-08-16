@@ -14,7 +14,7 @@ import secrets
 from datetime import datetime, date, time, timedelta, timezone
 from typing import Optional, List, Dict, Any
 from sqlalchemy.orm import Session
-from sqlalchemy import desc, text
+from sqlalchemy import desc, func, text
 import logging
 
 from database.models import (
@@ -353,6 +353,23 @@ def get_nutrition_logs_by_period(db: Session, user_id: int, start_date: date, en
         .order_by(NutritionLog.date, NutritionLog.meal_time)
         .all()
     )
+
+
+def get_daily_calories_by_period(db: Session, user_id: int, start_date: date, end_date: date) -> Dict[date, float]:
+    """Суммарные калории по дням за период — агрегация на стороне SQL.
+
+    Для adaptive TDEE (окно 42 дня, вызывается на каждый сейв еды): тянуть все
+    строки nutrition_log и суммировать в Python дорого, GROUP BY по дате
+    возвращает максимум window_days строк. Дни без записей в результате
+    отсутствуют (это дырки логирования, не нули).
+    """
+    rows = (
+        db.query(NutritionLog.date, func.sum(NutritionLog.totals["calories"].as_float()))
+        .filter(NutritionLog.user_id == user_id, NutritionLog.date >= start_date, NutritionLog.date <= end_date)
+        .group_by(NutritionLog.date)
+        .all()
+    )
+    return {d: float(total or 0) for d, total in rows}
 
 
 def get_activity_logs_by_period(db: Session, user_id: int, start_date: date, end_date: date) -> List[ActivityLog]:
