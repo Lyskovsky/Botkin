@@ -42,7 +42,7 @@ EXPECTED_TABLES = {
 }
 
 # Актуальный head миграций. Обновляется при каждой новой ревизии.
-HEAD_REVISION = "funnel0evt01"
+HEAD_REVISION = "meal0remind01"
 
 
 def _alembic_config() -> Config:
