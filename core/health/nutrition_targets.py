@@ -71,8 +71,9 @@ def calculate_targets(
 
     estimated_tdee = 0.0
 
-    # 0. Адаптивный TDEE из питания+веса — самый честный источник
-    if adaptive_tdee and adaptive_tdee > 1200:
+    # 0. Адаптивный TDEE из питания+веса — самый честный источник.
+    # Диапазон уже гарантирован санити-границами compute_adaptive_tdee.
+    if adaptive_tdee is not None:
         estimated_tdee = float(adaptive_tdee)
         logger.info(f"[targets] TDEE адаптивный (питание+вес): {estimated_tdee:.0f}")
     # 1. Ручные настройки пользователя (BMR + активные)

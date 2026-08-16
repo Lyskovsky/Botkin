@@ -167,6 +167,68 @@ def test_get_adaptive_tdee_isolated_by_user(test_db):
     assert get_adaptive_tdee(895655, as_of=AS_OF, db=test_db) is None
 
 
+def test_weight_dates_converted_to_user_timezone(test_db):
+    """Дата взвешивания — локальный день пользователя, не UTC-день (HIGH из ревью).
+
+    21:30 UTC = 00:30 следующего дня в UTC+3: взвешивание должно лечь на
+    локальную дату, иначе анкер и span сдвигаются на день.
+    """
+    from database.crud import create_nutrition_log, create_weight
+
+    uid = 895655
+    for i in range(30):
+        create_nutrition_log(
+            db=test_db,
+            user_id=uid,
+            date=AS_OF - timedelta(days=i),
+            meal_time=time(12, 0),
+            meal_name="lunch",
+            items=[],
+            totals={"calories": 1900},
+        )
+    # По UTC это AS_OF-28, но в UTC+3 уже AS_OF-27
+    w1 = datetime.combine(AS_OF - timedelta(days=28), time(21, 30), tzinfo=timezone.utc)
+    w2 = datetime.combine(AS_OF, time(8, 0), tzinfo=timezone.utc)
+    create_weight(test_db, uid, w1, 84.0)
+    create_weight(test_db, uid, w2, 83.0)
+
+    with patch("core.infra.tz.get_user_tz", return_value=timezone(timedelta(hours=3))):
+        r = get_adaptive_tdee(uid, as_of=AS_OF, db=test_db)
+
+    assert r is not None
+    assert r["span_days"] == 27
+    assert r["tdee"] == round(1900 + KCAL_PER_KG_FAT / 27)
+
+
+def test_smoothing_includes_weights_after_as_of(test_db):
+    """Ретроспективный расчёт (/day за прошлую дату): взвешивания в ±5 дней
+    ПОСЛЕ as_of тоже сглаживают конечный анкер (MEDIUM из ревью — иначе TDEE
+    для одной и той же даты различался «в моменте» и задним числом)."""
+    from database.crud import create_nutrition_log, create_weight
+
+    uid = 895655
+    for i in range(30):
+        create_nutrition_log(
+            db=test_db,
+            user_id=uid,
+            date=AS_OF - timedelta(days=i),
+            meal_time=time(12, 0),
+            meal_name="lunch",
+            items=[],
+            totals={"calories": 1900},
+        )
+    create_weight(test_db, uid, datetime.combine(AS_OF - timedelta(days=27), time(8, 0), tzinfo=timezone.utc), 84.0)
+    create_weight(test_db, uid, datetime.combine(AS_OF, time(8, 0), tzinfo=timezone.utc), 83.0)
+    # Будущая точка в ±5 дней от конечного анкера — должна попасть в сглаживание
+    create_weight(test_db, uid, datetime.combine(AS_OF + timedelta(days=3), time(8, 0), tzinfo=timezone.utc), 82.0)
+
+    with patch("core.infra.tz.get_user_tz", return_value=timezone.utc):
+        r = get_adaptive_tdee(uid, as_of=AS_OF, db=test_db)
+
+    # анкер конца = mean(83.0, 82.0) = 82.5 → Δ = -1.5 кг за 27 дней
+    assert r["tdee"] == round(1900 + KCAL_PER_KG_FAT * 1.5 / 27)
+
+
 # ── calculate_targets: адаптивный TDEE приоритетнее девайсов и manual ────────
 
 

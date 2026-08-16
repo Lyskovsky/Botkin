@@ -52,7 +52,7 @@ def compute_adaptive_tdee(
 
     intake_by_day: дата → суммарные ккал за день (только дни, где лог вообще есть).
     weights: (дата, кг); допускаются несколько замеров в день и точки чуть
-        старше окна (используются для сглаживания стартового анкера).
+        за пределами окна с обеих сторон (используются для сглаживания анкеров).
     """
     window_start = as_of - timedelta(days=WINDOW_DAYS - 1)
 
@@ -115,29 +115,42 @@ def get_adaptive_tdee(user_id: int, as_of: Optional[date_type] = None, db=None) 
 
         db = SessionLocal()
     try:
-        from database.crud import get_nutrition_logs_by_period, get_weights_by_period
+        from core.infra.tz import get_user_tz
+        from database.crud import get_daily_calories_by_period, get_weights_by_period
 
+        user_tz = get_user_tz(user_id)
         if as_of is None:
-            as_of = datetime.now(timezone.utc).date()
+            as_of = datetime.now(user_tz).date()
         window_start = as_of - timedelta(days=WINDOW_DAYS - 1)
 
-        intake_by_day: dict = {}
-        for log in get_nutrition_logs_by_period(db, user_id, window_start, as_of):
-            kcal = (log.totals or {}).get("calories") or 0
-            intake_by_day[log.date] = intake_by_day.get(log.date, 0) + kcal
+        # Калории по дням — агрегация в SQL (окно 42 дня на каждый сейв еды,
+        # тянуть все строки и суммировать в Python дорого).
+        intake_by_day = get_daily_calories_by_period(db, user_id, window_start, as_of)
 
-        # Взвешивания с запасом ±5 дней слева — для сглаживания стартового анкера.
-        w_rows = get_weights_by_period(
-            db,
-            user_id,
-            datetime.combine(window_start - timedelta(days=SMOOTH_HALF_WINDOW_DAYS), datetime.min.time()),
-            datetime.combine(as_of + timedelta(days=1), datetime.min.time()),
+        # Взвешивания с запасом ±5 дней С ОБЕИХ сторон окна — для сглаживания
+        # обоих анкеров. Симметрия важна при ретроспективном as_of (/day за
+        # прошлую дату): без правого буфера TDEE той же даты различался бы
+        # «в моменте» и задним числом. Границы — aware полночь в зоне
+        # пользователя (naive-граница на TIMESTAMPTZ плавает по session tz).
+        lo = datetime.combine(
+            window_start - timedelta(days=SMOOTH_HALF_WINDOW_DAYS), datetime.min.time(), tzinfo=user_tz
         )
-        weights = [(w.measured_at.date(), float(w.weight)) for w in w_rows]
+        hi = datetime.combine(as_of + timedelta(days=SMOOTH_HALF_WINDOW_DAYS + 1), datetime.min.time(), tzinfo=user_tz)
+        w_rows = get_weights_by_period(db, user_id, lo, hi)
+
+        # Дата взвешивания — локальный день пользователя: вечерний замер по UTC
+        # может формально попасть на соседний день и сдвинуть анкер/span.
+        # Naive measured_at (SQLite в тестах) трактуем как UTC.
+        weights = []
+        for w in w_rows:
+            measured = w.measured_at if w.measured_at.tzinfo else w.measured_at.replace(tzinfo=timezone.utc)
+            weights.append((measured.astimezone(user_tz).date(), float(w.weight)))
 
         return compute_adaptive_tdee(intake_by_day, weights, as_of)
-    except Exception as e:
-        logger.warning(f"get_adaptive_tdee failed for user {user_id}: {e}")
+    except Exception:
+        # Фолбэк на цепочку Garmin/Apple/manual — но с трейсбеком в логе,
+        # чтобы реальный баг не маскировался под «мало данных».
+        logger.exception(f"get_adaptive_tdee failed for user {user_id}")
         return None
     finally:
         if own:
