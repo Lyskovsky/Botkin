@@ -49,6 +49,12 @@
 /* "Сегодня" — informational only (NOT used in goal calc).
    Faded so it visually defers to "ср" (the 14-day average that drives the goal). */
 .bmr-today-hint { opacity: 0.5; font-size: 11px; }
+/* Источник адаптивной цели — тонкая полоса под шапкой на всю ширину,
+   чтобы не распирать правую колонку четвёртой строкой. */
+.budget-source-note {
+  font-size: 11px; color: var(--muted); opacity: 0.65;
+  text-align: right; margin-top: 4px;
+}
 .budget-remaining {
   font-size: 34px; font-weight: 900; letter-spacing: -1px; line-height: 1;
   display: block;
