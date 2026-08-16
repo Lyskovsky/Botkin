@@ -292,7 +292,7 @@ input.editable:focus{border-color:var(--b);outline:none;background:var(--bg2)}
 
 <section>
   <h2>🤖 Здоровье бота <span class="badge g" id="bothealth-badge">…</span></h2>
-  <div id="bothealth-kpis" class="kpis"></div>
+  <div id="bothealth-kpis" class="kpi-row"></div>
   <details style="margin-top:10px">
     <summary class="muted">📜 Последние 10 событий audit_log</summary>
     <div style="font-size:11px; color:var(--muted); margin: 4px 0 8px">
@@ -497,12 +497,12 @@ async function loadBotHealth(){
     $('bothealth-badge').textContent = okBadge ? '✓ работает' : '⚠ внимание';
     $('bothealth-badge').className = 'badge ' + (okBadge ? 'g' : 'y');
     $('bothealth-kpis').innerHTML = `
-      <div class="kpi"><div class="l">Uptime</div><div class="v">${d.uptime_pretty}</div></div>
-      <div class="kpi"><div class="l">Ошибок за 24ч</div><div class="v ${d.errors_24h>10?'crit':''}">${d.errors_24h}</div></div>
-      <div class="kpi"><div class="l">Ошибок за 30д</div><div class="v ${d.errors_30d>30?'crit':''}">${d.errors_30d}</div></div>
-      <div class="kpi"><div class="l">Ошибок всего</div><div class="v muted" style="font-size:16px">${d.errors_total}</div><div class="n">с начала лога</div></div>
-      <div class="kpi"><div class="l">Сообщений сегодня</div><div class="v">${d.messages_today}</div></div>
-      <div class="kpi"><div class="l">Webhook</div><div class="v" style="font-size:14px">${d.webhook_ok?'✓ ok':'✗ down'}</div></div>`;
+      <div class="kpi" title="Сколько времени процесс бота работает непрерывно с последнего перезапуска (деплой или краш обнуляют счётчик)"><div class="l">Uptime</div><div class="v">${d.uptime_pretty}</div></div>
+      <div class="kpi" title="Ошибки (ERROR/CRITICAL) в логе бота за последние 24 часа — сигнал о проблемах прямо сейчас"><div class="l">Ошибок за 24ч</div><div class="v ${d.errors_24h>10?'crit':''}">${d.errors_24h}</div></div>
+      <div class="kpi" title="Ошибки (ERROR/CRITICAL) в логе бота за последние 30 дней — чтобы видеть частоту проблем, а не только сиюминутную картину"><div class="l">Ошибок за 30д</div><div class="v ${d.errors_30d>30?'crit':''}">${d.errors_30d}</div></div>
+      <div class="kpi" title="Все ошибки (ERROR/CRITICAL) за всё время, что существует лог bot_debug.log. Лог не чистится и не ротируется намеренно — нужен для разбора инцидентов"><div class="l">Ошибок всего</div><div class="v muted" style="font-size:16px">${d.errors_total}</div><div class="n">с начала лога</div></div>
+      <div class="kpi" title="Сколько сообщений от пользователей обработал бот сегодня (с полуночи UTC) — источник: agent_conversations"><div class="l">Сообщений сегодня</div><div class="v">${d.messages_today}</div></div>
+      <div class="kpi" title="Получал ли бот активность от пользователей за последние 30 минут — простой индикатор «бот на связи», не проверка самого Telegram-вебхука"><div class="l">Webhook</div><div class="v" style="font-size:14px">${d.webhook_ok?'✓ ok':'✗ down'}</div></div>`;
     const arows = (d.audit_recent||[]).map(e =>
       `<tr><td class="mono dim" style="font-size:10px">${fmtDate(e.ts)}</td><td class="mono">${e.user_id||'—'}</td><td>${e.table_name}</td><td class="muted">${e.action}</td></tr>`).join('');
     $('bothealth-audit').innerHTML = arows || '<tr><td colspan="4" class="placeholder">Тихо</td></tr>';
