@@ -187,7 +187,8 @@ button.primary:hover{background:#2563eb}
 button.danger{color:var(--r);border-color:rgba(255,59,109,.4)}
 button.danger:hover{background:rgba(255,59,109,.1)}
 button.ok{color:var(--g);border-color:rgba(0,255,157,.3)}
-.actions{display:flex;gap:6px;flex-wrap:wrap}
+.actions{display:flex;gap:6px;flex-wrap:nowrap}
+.icon-btn{width:30px;height:30px;padding:0;flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;font-size:14px;line-height:1}
 .kpi-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:16px}
 .kpi{background:var(--bg2);padding:14px;border-radius:8px;border:1px solid var(--bd)}
 .kpi .l{color:var(--mu);font-size:11px;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px}
@@ -230,8 +231,8 @@ input.editable:focus{border-color:var(--b);outline:none;background:var(--bg2)}
   <div class="kpi-row" id="users-kpi"></div>
   <div style="overflow-x:auto"><table id="users-table">
     <thead><tr>
-      <th>Имя</th><th>Telegram</th><th title="Telegram user_id, он же primary key в нашей БД">Telegram ID</th>
-      <th>Cohort</th><th>Возраст</th><th>Зарегистрирован</th><th>Активен</th>
+      <th>Имя</th><th>Telegram</th><th title="Telegram user_id, он же primary key в нашей БД">ID</th>
+      <th>Cohort</th><th>Возраст</th><th>Регистрация</th><th>Активен</th>
       <th>Meals 7д/всего</th><th>Supps 7д/всего</th>
       <th title="Health Knowledge Base — папка с медданными, профилем и анализами">KB</th>
       <th>Действия</th>
@@ -337,11 +338,11 @@ async function loadUsers(){
         `<option value="${v}"${v===kbCurrent?' selected':''}>${lbl}</option>`).join('');
       const kbCls = 'kb-pill k-' + kbCurrent;
       const blockBtn = u.is_active
-        ? `<button class="danger" onclick="toggleActive(${u.telegram_id}, false)">блок</button>`
-        : `<button class="ok" onclick="toggleActive(${u.telegram_id}, true)">разблок</button>`;
+        ? `<button class="danger icon-btn" title="Заблокировать" onclick="toggleActive(${u.telegram_id}, false)">🚫</button>`
+        : `<button class="ok icon-btn" title="Разблокировать" onclick="toggleActive(${u.telegram_id}, true)">✅</button>`;
       const canDelete = u.cohort !== 'owner' && u.cohort !== 'family';
       const deleteBtn = canDelete
-        ? `<button class="danger" onclick="deleteUser(${u.telegram_id}, '${(u.username||'').replace(/'/g,"")}', ${u.meals_total}, ${u.supps_total})">удалить</button>`
+        ? `<button class="danger icon-btn" title="Удалить навсегда" onclick="deleteUser(${u.telegram_id}, '${(u.username||'').replace(/'/g,"")}', ${u.meals_total}, ${u.supps_total})">🗑️</button>`
         : '';
       const sx = (u.sex||'').toLowerCase();
       const sexEmoji = (sx==='male'||sx==='m') ? '♂' : ((sx==='female'||sx==='f') ? '♀' : '');
