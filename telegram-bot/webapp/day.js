@@ -138,13 +138,15 @@
         else lines.push(`🎯 поддержание`);
       }
 
-      // Adaptive TDEE: maintenance выведен из питания+веса пользователя,
-      // а не из оценки девайса — подписываем источник.
-      if (g.tdee_source === 'adaptive' && g.tdee_days) {
-        lines.push(`<span class="bmr-today-hint">📈 по вашим данным за ${g.tdee_days} дн.</span>`);
-      }
       infoCol = `<div class="budget-info-col">${lines.join('<br>')}</div>`;
     }
+
+    // Adaptive TDEE: maintenance выведен из питания+веса пользователя, а не из
+    // оценки девайса. Подпись — отдельной полосой под шапкой: четвёртая строка
+    // в правой колонке распирала баннер и ломала раскладку на телефоне.
+    const sourceNote = (g.tdee_source === 'adaptive' && g.tdee_days)
+      ? `<div class="budget-source-note">📈 по вашим данным за ${g.tdee_days} дн.</div>`
+      : '';
 
     banner.innerHTML = `
     <div class="budget-banner-inner">
@@ -153,7 +155,7 @@
         <span class="budget-sub">${subText}</span>
       </div>
       ${infoCol}
-    </div>`;
+    </div>${sourceNote}`;
   }
 
   function renderSlots() {
