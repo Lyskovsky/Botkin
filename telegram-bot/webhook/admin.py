@@ -339,6 +339,10 @@ async function loadUsers(){
       const blockBtn = u.is_active
         ? `<button class="danger" onclick="toggleActive(${u.telegram_id}, false)">блок</button>`
         : `<button class="ok" onclick="toggleActive(${u.telegram_id}, true)">разблок</button>`;
+      const canDelete = u.cohort !== 'owner' && u.cohort !== 'family';
+      const deleteBtn = canDelete
+        ? `<button class="danger" onclick="deleteUser(${u.telegram_id}, '${(u.username||'').replace(/'/g,"")}', ${u.meals_total}, ${u.supps_total})">удалить</button>`
+        : '';
       const sx = (u.sex||'').toLowerCase();
       const sexEmoji = (sx==='male'||sx==='m') ? '♂' : ((sx==='female'||sx==='f') ? '♀' : '');
       const ageStr = u.age!==null ? `${u.age}л ${sexEmoji}` : '<span class="dim">—</span>';
@@ -356,7 +360,7 @@ async function loadUsers(){
         <td><span class="${u.meals_7d?'':'dim'}">${u.meals_7d}</span> / <span class="muted">${u.meals_total}</span></td>
         <td><span class="${u.supps_7d?'':'dim'}">${u.supps_7d}</span> / <span class="muted">${u.supps_total}</span></td>
         <td><select onchange="changeKB(${u.telegram_id}, this.value)" class="${kbCls}">${kbOpts}</select></td>
-        <td class="actions">${blockBtn}</td>
+        <td class="actions">${blockBtn}${deleteBtn}</td>
       </tr>`;
     }).join('');
     $('users-table').querySelector('tbody').innerHTML = rows || '<tr><td colspan="11" class="placeholder">Нет пользователей</td></tr>';
@@ -412,6 +416,17 @@ async function toggleActive(tid, active){
   try{
     await api('/admin/api/users/'+tid+'/active', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({is_active: active})});
     toast(active ? '✓ Разблокирован' : '✓ Заблокирован');
+    loadUsers();
+  } catch(e){ toast('Ошибка: '+e.message, 'err') }
+}
+
+async function deleteUser(tid, username, meals, supps){
+  const label = username ? '@'+username : ('id '+tid);
+  const warn = (meals||supps) ? `\n\nБудет удалено: ${meals} записей еды, ${supps} добавок (+ вес/АД/сон/анализы если есть).` : '\n\nДанных о еде/добавках нет.';
+  if(!confirm(`Удалить пользователя ${label} НАВСЕГДА?${warn}\n\nЭто необратимо (кроме восстановления из бэкапа).`)) return;
+  try{
+    await api('/admin/api/users/'+tid+'?confirm=true', {method:'DELETE'});
+    toast('✓ Пользователь '+label+' удалён');
     loadUsers();
   } catch(e){ toast('Ошибка: '+e.message, 'err') }
 }
@@ -708,6 +723,39 @@ async def api_user_cohort(tg_id: int, request: Request, _: str = Depends(admin_a
         db.commit()
         logger.info(f"[admin] User {tg_id} cohort → {cohort}")
         return JSONResponse({"ok": True, "cohort": cohort})
+    finally:
+        db.close()
+
+
+@router.delete("/api/users/{tg_id}")
+async def api_user_delete(tg_id: int, confirm: bool = False, admin: str = Depends(admin_auth)) -> JSONResponse:
+    """Жёсткое удаление пользователя.
+
+    `DELETE FROM users` каскадирует на nutrition_log/weights/blood_pressure_logs/
+    body_measurements/blood_tests/workouts/glucose_readings/cgm_connections/
+    health_reports/personal_access_tokens/user_settings (все — ON DELETE CASCADE,
+    см. database/models.py).
+
+    Сознательно НЕ удаляются audit-trail таблицы без FK на users
+    (agent_conversations, llm_usage_log, user_feedback, funnel_events,
+    food_interactions) — они по дизайну переживают удаление юзера.
+
+    `owner`/`family` через этот эндпоинт удалить нельзя — только early_user/external
+    (защита от случайного удаления членов семьи из общей кнопки).
+    """
+    if not confirm:
+        raise HTTPException(400, "confirm=true required")
+    db = SessionLocal()
+    try:
+        u = db.query(User).filter_by(telegram_id=tg_id).first()
+        if not u:
+            raise HTTPException(404, "User not found")
+        if u.cohort in ("owner", "family"):
+            raise HTTPException(403, "Нельзя удалить owner/family через админку")
+        db.delete(u)
+        db.commit()
+        logger.warning(f"[admin] User {tg_id} (@{u.username}) DELETED by {admin}")
+        return JSONResponse({"ok": True, "deleted": tg_id})
     finally:
         db.close()
 
