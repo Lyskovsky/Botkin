@@ -19,6 +19,7 @@
 | `activity_log` | Активность за день (Garmin) | `id` autoinc | `steps`, `active_calories`, `bmr_calories`, `hrv` |
 | `blood_tests` | Анализы крови | `id` autoinc | `values` JSONB, `test_type`, `status` |
 | `body_measurements` | Замеры тела (талия, шея, …) | `id` autoinc | `waist_cm`, `neck_cm`, и т.п. |
+| `verified_products` | Справочник проверенных продуктов (#255) | `id` autoinc | `name_norm`, `*_per_100g`, `portion_g`, `barcode`; `user_id NULL` = общая запись |
 
 Кроме того в БД есть **legacy/orphan таблицы** не управляемые SQLAlchemy: `blood_pressure_logs`, `daily_summaries`, `sleep_records`, `workouts`. Заполняются Apple Health webhook'ом для давления и оставлены ради старых скриптов аналитики. Из бот-кода **не читать**.
 
@@ -334,6 +335,19 @@ class BodyMeasurement(Base):
 - `idx_measurements_user_date` on `(user_id, date)`
 
 ---
+
+## 9. `verified_products` — справочник проверенных продуктов (#255)
+
+Этикеточные КБЖУ упакованных продуктов, чтобы LLM-vision не оценивал один и
+тот же батончик заново при каждом фото. Подробности дизайна — [ADR-0007](../architecture/decisions/0007-verified-products-catalog.md).
+
+- `user_id BIGINT NULL` → `users.telegram_id`; **NULL = общая запись, видна всем**; личная приоритетнее общей при матчинге.
+- `name` + `name_norm` (нормализация — `core/food/verified_products.py::normalize_product_name`, единая точка), `brand`, `aliases` JSONB, `barcode`.
+- `calories/protein/fats/carbs_per_100g FLOAT NOT NULL`, `fiber_per_100g`, `portion_g` (вес штуки/порции с этикетки) — nullable.
+- `source`: `user_correction | label_photo | manual | import`; `times_used` — ранжирование топ-20 в промпт-блок.
+- Уникальность — два частичных индекса: `(user_id, name_norm)` для личных, `(name_norm)` для общих (обычный UNIQUE не дедуплицирует NULL user_id).
+- RLS: чтение `user_id IS NULL OR user_id = app.user_id`, запись — только свои строки (сознательное отклонение от строгого `user_isolation`).
+- Потребители: `core/food/verified_products.py` (post-match в `save_meal_to_db` + промпт-блок в `core/llm/router.py`), кнопка «💾 Запомнить продукт» (`telegram-bot/handlers/verified_products.py`), сид `scripts/import/seed_verified_products.py`.
 
 ## Удалённые таблицы (для исторического контекста)
 

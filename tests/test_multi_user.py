@@ -14,16 +14,69 @@ class TestMultiUserAuth:
     """Tests for multi-user authorization"""
 
     def test_admin_user_is_admin(self, monkeypatch):
-        """Admin gate works when BOTKIN_ADMIN_ID настроен.
+        """Admin gate works when ADMIN_USER_IDS настроен.
 
-        ADMIN_USER_ID берётся из env BOTKIN_ADMIN_ID (дефолт 0). В тест-окружении
-        env не задан, поэтому патчим значение и проверяем логику is_admin напрямую.
+        Источник истины — множество ADMIN_USER_IDS (из env). В тест-окружении env
+        не задан, поэтому патчим множество и проверяем is_admin напрямую.
         """
         import config.users as users_mod
 
-        monkeypatch.setattr(users_mod, "ADMIN_USER_ID", 895655)
+        monkeypatch.setattr(users_mod, "ADMIN_USER_IDS", {895655})
         assert users_mod.is_admin(895655) is True
         assert users_mod.is_admin(1) is False
+
+    def test_multiple_admins(self, monkeypatch):
+        """#272: несколько админов — is_admin пускает любого из списка."""
+        import config.users as users_mod
+
+        monkeypatch.setattr(users_mod, "ADMIN_USER_IDS", {895655, 830908046})
+        assert users_mod.is_admin(895655) is True
+        assert users_mod.is_admin(830908046) is True
+        assert users_mod.is_admin(1) is False
+
+    def test_no_admins_configured_nobody_is_admin(self, monkeypatch):
+        """Пустой список админов → никто не админ (дефолт безопасный)."""
+        import config.users as users_mod
+
+        monkeypatch.setattr(users_mod, "ADMIN_USER_IDS", set())
+        assert users_mod.is_admin(895655) is False
+        assert users_mod.is_admin(0) is False
+
+    def test_parse_admin_ids_list(self, monkeypatch):
+        """#272: BOTKIN_ADMIN_IDS — список через запятую (с пробелами/точкой с запятой)."""
+        import config.users as users_mod
+
+        monkeypatch.setenv("BOTKIN_ADMIN_IDS", " 895655, 830908046 ;  7 ")
+        monkeypatch.delenv("BOTKIN_ADMIN_ID", raising=False)
+        assert users_mod._parse_admin_ids() == {895655, 830908046, 7}
+
+    def test_parse_admin_ids_backward_compat_legacy(self, monkeypatch):
+        """#272: старая одиночная BOTKIN_ADMIN_ID продолжает работать и объединяется."""
+        import config.users as users_mod
+
+        monkeypatch.delenv("BOTKIN_ADMIN_IDS", raising=False)
+        monkeypatch.setenv("BOTKIN_ADMIN_ID", "895655")
+        assert users_mod._parse_admin_ids() == {895655}
+
+        # И BOTKIN_ADMIN_IDS, и legacy заданы → объединение.
+        monkeypatch.setenv("BOTKIN_ADMIN_IDS", "830908046")
+        assert users_mod._parse_admin_ids() == {895655, 830908046}
+
+    def test_parse_admin_ids_ignores_garbage_and_zero(self, monkeypatch):
+        """Нечисловые токены, пустые и 0 игнорируются."""
+        import config.users as users_mod
+
+        monkeypatch.setenv("BOTKIN_ADMIN_IDS", "0, abc, , 895655, -5")
+        monkeypatch.delenv("BOTKIN_ADMIN_ID", raising=False)
+        assert users_mod._parse_admin_ids() == {895655}
+
+    def test_parse_admin_ids_empty_when_unset(self, monkeypatch):
+        """Ничего не задано → пустое множество (никто не админ)."""
+        import config.users as users_mod
+
+        monkeypatch.delenv("BOTKIN_ADMIN_IDS", raising=False)
+        monkeypatch.delenv("BOTKIN_ADMIN_ID", raising=False)
+        assert users_mod._parse_admin_ids() == set()
 
     def test_random_user_is_not_admin(self):
         """Test that random users don't have admin privileges"""

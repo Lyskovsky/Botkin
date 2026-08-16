@@ -16,8 +16,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 logger = logging.getLogger(__name__)
 
-ADMIN_USER_ID = 895655  # only admin can use /block, /unblock, /users
-
 
 class AuthMiddleware(BaseMiddleware):
     """

@@ -175,3 +175,45 @@ def test_explicit_unit_system_overrides_carrier():
     # Явный параметр важнее ключа в values.
     canon, _ = to_canonical({"_unit_system": "US", "albumin_g_l": 42.0}, unit_system="metric")
     assert canon["albumin_g_l"] == 42.0
+
+
+# --- Hb/MCHC: US-конверсия по флагу + read-time g/dL-guard (#295) ---
+
+
+def test_us_conversion_hemoglobin_mchc():
+    # US-панель: Hb/MCHC в g/dL → г/л (×10) через US_TO_METRIC.
+    canon, _ = to_canonical({"_unit_system": "US", "hemoglobin": 15.5, "MCHC": 35.1})
+    assert math.isclose(canon["Hb"], 155.0, rel_tol=1e-6)
+    assert math.isclose(canon["MCHC"], 351.0, rel_tol=1e-6)
+
+
+def test_gdl_guard_hemoglobin_without_unit_system():
+    # maccabi-панель без _unit_system="US": Hb 15.5 физиологически = g/dL → ×10 на чтении.
+    canon, warnings = to_canonical({"hemoglobin": 15.5})
+    assert math.isclose(canon["Hb"], 155.0, rel_tol=1e-6)
+    assert any("Hb" in w for w in warnings)  # трансформация не молча
+
+
+def test_gdl_guard_mchc_without_unit_system():
+    canon, warnings = to_canonical({"MCHC": 35.1})
+    assert math.isclose(canon["MCHC"], 351.0, rel_tol=1e-6)
+    assert any("MCHC" in w for w in warnings)
+
+
+def test_metric_hemoglobin_not_touched():
+    # Анти-регресс: нормальный метрический Hb (3-значный г/л) не трогаем.
+    canon, warnings = to_canonical({"Hb": 155})
+    assert canon["Hb"] == 155
+    assert not any("Hb" in w for w in warnings)
+
+
+def test_us_hemoglobin_not_double_converted():
+    # US ×10 уже дал 155 → guard (порог 30) не срабатывает повторно.
+    canon, _ = to_canonical({"_unit_system": "US", "hemoglobin": 15.5})
+    assert math.isclose(canon["Hb"], 155.0, rel_tol=1e-6)
+
+
+def test_gdl_guard_boundary_hemoglobin_low_metric():
+    # Hb 130 г/л (нижняя граница нормы) — метрика, guard не трогает.
+    canon, _ = to_canonical({"Hb": 130})
+    assert canon["Hb"] == 130

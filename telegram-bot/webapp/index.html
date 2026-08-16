@@ -201,12 +201,26 @@
     </div>
     <div class="settings-row" id="link-report-row">
       <div class="row-label" onclick="openReport()" style="cursor:pointer;flex:1">
-        Медицинский отчёт
-        <div class="row-sub">HTML-страница для врача или себя</div>
+        Снимок дашборда
+        <div class="row-sub">Постоянная ссылка на копию дашборда</div>
       </div>
       <button class="link-copy-btn" id="link-report-copy" onclick="copyReport()" title="Скопировать ссылку">⎘</button>
       <div class="row-chevron" onclick="openReport()" style="cursor:pointer">›</div>
     </div>
+    <div class="settings-row" id="doctor-export-row" onclick="toggleDoctorLang()" style="cursor:pointer">
+      <div class="row-label" style="flex:1">
+        Экспорт для врача (PDF)
+        <div class="row-sub">PDF-файл придёт в чат</div>
+      </div>
+      <div class="row-chevron">›</div>
+    </div>
+    <div id="doctor-lang-choice" class="doctor-lang-choice" hidden>
+      <span class="doctor-lang-prompt">Язык:</span>
+      <button type="button" class="lang-choice-btn" data-lang="ru" onclick="requestDoctorReport('ru')">Русский</button>
+      <button type="button" class="lang-choice-btn" data-lang="en" onclick="requestDoctorReport('en')">English</button>
+      <button type="button" class="lang-choice-cancel" onclick="toggleDoctorLang()" aria-label="Отмена">✕</button>
+    </div>
+    <div id="doctor-export-status" class="doctor-export-status"></div>
   </div>
   <div id="links-toast" class="links-toast hidden">Ссылка скопирована</div>
 
@@ -221,6 +235,10 @@
   <!-- ПРОЧЕЕ -->
   <div class="group-title">Прочее</div>
   <div class="settings-group">
+    <div class="settings-row clickable" onclick="go('feedback')">
+      <div class="row-label">Обратная связь<div class="row-sub">Сообщить об ошибке или идее</div></div>
+      <div class="row-chevron">›</div>
+    </div>
     <div class="settings-row clickable" onclick="go('help')">
       <div class="row-label">Справка</div>
       <div class="row-chevron">›</div>
@@ -252,13 +270,50 @@
 
 <!-- NOTIFICATIONS moved inline into #home (Phase 2) -->
 
+<!-- FEEDBACK (сообщить об ошибке / идею — #271) -->
+<div id="feedback" class="section" style="padding:0">
+  <button class="back-btn-ios" onclick="go('home')">‹ Назад</button>
+  <div class="drill-header">💬 Обратная связь</div>
+  <div style="padding:0 16px 16px">
+    <p style="color:#8e8e93;font-size:13px;margin:0 0 12px">
+      Нашли ошибку или есть идея? Напишите — сообщение попадёт напрямую разработчикам.
+    </p>
+    <div class="field-label" style="margin-bottom:8px">Тип</div>
+    <div class="bmr-mode-pillbox" id="fb-kind-box">
+      <label class="bmr-mode-opt"><input type="radio" name="fb-kind" value="bug" checked><span>🐞 Ошибка</span></label>
+      <label class="bmr-mode-opt"><input type="radio" name="fb-kind" value="feature"><span>💡 Идея</span></label>
+      <label class="bmr-mode-opt"><input type="radio" name="fb-kind" value="question"><span>❓ Вопрос</span></label>
+    </div>
+    <textarea id="fb-text" rows="5" maxlength="4000" placeholder="Опишите проблему или идею…"
+      style="width:100%;box-sizing:border-box;margin-top:12px;border:1px solid #ddd;border-radius:10px;padding:10px 12px;font-size:14px;font-family:inherit;resize:vertical"></textarea>
+    <button class="calc-btn" id="fb-send-btn" onclick="sendFeedback()"
+      style="margin-top:12px;padding:10px 16px;background:#34c759;color:#fff;border:none;width:100%">Отправить</button>
+    <div id="fb-status" class="fb-status"></div>
+  </div>
+</div>
+
 <!-- HELP -->
 <div id="help" class="section" style="padding:0">
   <button class="back-btn-ios" onclick="go('home')">‹ Назад</button>
   <div class="drill-header">📖 Справка</div>
   <div style="padding:0 16px">
 
+  <!-- Оглавление -->
   <div class="help-block">
+    <h3>Содержание</h3>
+    <ul style="list-style:none;padding-left:0">
+      <li><a href="javascript:void(0)" onclick="helpScroll('h-log')">🍽 Как логировать еду</a></li>
+      <li><a href="javascript:void(0)" onclick="helpScroll('h-supp')">💊 Как отметить добавки</a></li>
+      <li><a href="javascript:void(0)" onclick="helpScroll('h-cmd')">📊 Команды бота</a></li>
+      <li><a href="javascript:void(0)" onclick="helpScroll('h-burn')">🔥 Сколько калорий вы тратите</a></li>
+      <li><a href="javascript:void(0)" onclick="helpScroll('h-goal')">🎯 Как считается цель на день</a></li>
+      <li><a href="javascript:void(0)" onclick="helpScroll('h-today')">📅 Сегодня и прошлые дни — почему цифры разные</a></li>
+      <li><a href="javascript:void(0)" onclick="helpScroll('h-incomplete')">⚠️ «Итог оценочный» — что это значит</a></li>
+      <li><a href="javascript:void(0)" onclick="helpScroll('h-precision')">⚖️ Насколько точны цифры</a></li>
+    </ul>
+  </div>
+
+  <div class="help-block" id="h-log">
     <h3>🍽 Как логировать еду</h3>
     <ul>
       <li><span class="emoji">✍️</span><span>Текст: <code>гречка 150г, курица 200г</code></span></li>
@@ -268,12 +323,12 @@
     </ul>
   </div>
 
-  <div class="help-block">
+  <div class="help-block" id="h-supp">
     <h3>💊 Как отметить добавки</h3>
     <p>Напишите названия в чат: <code>Витамин Д, Омега</code> или тапните в табе 💊 Добавки.</p>
   </div>
 
-  <div class="help-block">
+  <div class="help-block" id="h-cmd">
     <h3>📊 Команды бота</h3>
     <table class="cmd-table">
       <tr><td>/day</td><td>Итоги дня</td></tr>
@@ -284,11 +339,55 @@
     <p style="margin-top:6px;font-size:11px;color:#888">⚙️ Настройки — в этом мини-аппе, таб Настройки.</p>
   </div>
 
-  <div class="help-block">
-    <h3>⚖️ Лимит калорий</h3>
-    <p>Средний расход за 14 дней по Garmin × 0.85 (−15%). Нет Garmin — BMR из Настроек.</p>
+  <div class="help-block" id="h-burn">
+    <h3>🔥 Сколько калорий вы тратите</h3>
+    <p>Ваш расход за день складывается из двух частей:</p>
+    <ul>
+      <li><span class="emoji">💤</span><span><b>Базовый обмен (BMR)</b> — калории, которые тело сжигает просто на жизнь: дыхание, сердце, мозг, тепло. Это большая часть расхода, обычно 1400–1900 ккал — даже если весь день лежать.</span></li>
+      <li><span class="emoji">🏃</span><span><b>Активность</b> — всё движение за день: шаги, тренировки, уборка. Обычно 200–700 ккал.</span></li>
+    </ul>
+    <p>Сумма — ваш <b>общий расход</b> (по-научному TDEE). Botkin предпочитает брать его с часов — они видят вашу реальную активность:</p>
+    <ul>
+      <li><span class="emoji">⌚</span><span><b>Garmin</b> — напрямую;</span></li>
+      <li><span class="emoji">🍎</span><span><b>Apple Watch / iPhone</b> — через Apple Health;</span></li>
+      <li><span class="emoji">🤖</span><span><b>Android</b> — через Health Connect.</span></li>
+    </ul>
+    <p><b>Часов нет?</b> Настройки → Базовый расход → «Ручной (формула)»: укажите пол, возраст, рост, вес и уровень активности. Botkin посчитает расход по формуле Миффлина—Сан Жеора — тому же научному стандарту, которым пользуются MyFitnessPal, Cronometer и другие счётчики. Часы точнее формулы (видят каждый ваш день, а не «средний»), поэтому при их подключении данные часов в приоритете.</p>
   </div>
+
+  <div class="help-block" id="h-goal">
+    <h3>🎯 Как считается цель на день</h3>
+    <p><b>Цель = ваш расход − 15%.</b> Пример: тратите 2300 ккал → цель ~1950 ккал.</p>
+    <p>Эти минус 15% — <b>дефицит</b>: вы едите чуть меньше, чем тратите, и тело добирает разницу из жировых запасов. Так и происходит похудение.</p>
+    <p>Почему именно 15%, а не больше? Это темп, при котором уходит жир, а не мышцы, и не хочется сорваться. Жёсткие диеты (минус 30–50%) дают быстрый результат на весах, но за ними почти всегда следует срыв и откат. Процент можно поменять в Настройках: 0% — поддержание веса, плюс — набор массы.</p>
+  </div>
+
+  <div class="help-block" id="h-today">
+    <h3>📅 Сегодня и прошлые дни — почему цифры разные</h3>
+    <p><b>Сегодня</b> день ещё не закончен, и сколько вы потратите — неизвестно. Поэтому цель считается от среднего расхода за последние 14 дней. Если сегодня была тренировка и часы уже это увидели — цель поднимется по факту.</p>
+    <p><b>Прошлые дни</b> уже закончились, расход известен точно — и итог считается честно, от факта. Поэтому вечерняя цифра «осталось» и завтрашний итог того же дня могут немного отличаться: прогноз уточнился фактом.</p>
+    <p>💡 <b>Практический совет:</b> в малоподвижный день (мало шагов, без тренировки) не наедайте остаток до нуля — оставьте 150–300 ккал запаса. Прогноз по среднему в такие дни чуть щедрее реальности.</p>
+  </div>
+
+  <div class="help-block" id="h-incomplete">
+    <h3>⚠️ «Итог оценочный» — что это значит</h3>
+    <p>Иногда часы не успевают передать данные за весь день — например, лежали на зарядке. Тогда расход в этот день выглядит подозрительно маленьким.</p>
+    <p>Botkin замечает такие дни и честно помечает их значком ⚠️ вместо вердикта «перебор»: раз мы не знаем ваш настоящий расход, несправедливо утверждать, что вы переели.</p>
+  </div>
+
+  <div class="help-block" id="h-precision">
+    <h3>⚖️ Насколько точны цифры</h3>
+    <p>Подсчёт калорий — всегда оценка, а не аптечные весы. КБЖУ по фото — точность ±15–20%, расход с часов — ±10%. Это нормально и достаточно: для результата важна не точность одного дня, а <b>средняя картина за неделю</b> — тело считает баланс именно так.</p>
+    <p>Поэтому не переживайте из-за «перебора +100» в один день: посмотрите /week — если неделя в среднем в дефиците, всё идёт по плану.</p>
+  </div>
+
   </div><!-- /padding wrapper -->
+  <script>
+    function helpScroll(id) {
+      var el = document.getElementById(id);
+      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  </script>
 </div>
 
 </section><!-- /settings-section -->

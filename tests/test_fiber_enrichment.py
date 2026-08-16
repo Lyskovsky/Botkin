@@ -10,6 +10,8 @@ Covers:
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from core.food.fiber_table import (
@@ -224,3 +226,61 @@ def test_sum_fiber_missing_field():
 def test_sum_fiber_null_values():
     items = [{"fiber": None}, {"fiber": "invalid"}, {"fiber": 1.5}]
     assert sum_fiber(items) == 1.5
+
+
+# --- Прецедент 02.07.2026: "Овсяная каша готовая" 187г возвращала 18.7г ---
+# клетчатки (сухая норма 10.0/100г) вместо варёной ~1.7/100г. Пользователь и
+# агент сами заметили аномалию в чате. Варёная каша должна перехватываться
+# ДО generic ингредиента "овсян" (10.0, для сырой крупы/хлопьев).
+
+
+@pytest.mark.parametrize(
+    "name,weight,expected",
+    [
+        ("Овсяная каша готовая", 187, 3.2),
+        ("Овсяная каша варёная", 250, 4.2),
+        ("Каша овсяная на молоке", 200, 3.4),
+        ("овсяная каша", 200, 3.4),
+        ("Овсяная каша с маслом", 150, 2.5),
+    ],
+)
+def test_cooked_oatmeal_porridge_uses_cooked_fiber_value(name, weight, expected):
+    assert estimate_fiber(name, weight) == expected
+
+
+def test_oat_cookie_still_uses_cookie_value_not_porridge():
+    """Овсяное печенье не должно перехватываться новым паттерном "овсяная каша"."""
+    assert estimate_fiber("Овсяное печенье", 40) == 1.6
+
+
+def test_raw_dry_oats_still_uses_dry_value():
+    """Явно сырая крупа (без слова "каша") — прежняя сухая норма 10.0/100г."""
+    assert estimate_fiber("овсянка", 40) == 4.0
+
+
+# --- Прецедент 02.07.2026: "сух-УХА-я"/"с-УХА-рики" ложно матчили суп "уха" ---
+# (0.8/100г) вместо разумной нормы для сухариков/крутонов. "уха" как отдельное
+# блюдо не встретилась ни разу в реальной истории бота — только в этих ложных
+# срабатываниях. См. остаточный кейс "Овсянка (сухая)" в todo.md.
+
+
+def test_crouton_salad_not_misdetected_as_fish_soup():
+    assert estimate_fiber("Салат с кальмаром и сухариками в майонезе", 300) == 9.0
+
+
+def test_real_fish_soup_still_matches():
+    """Явное 'уха' (без 'сух-' коллизии) продолжает матчить суп."""
+    assert estimate_fiber("Уха из окуня", 300) == 2.4
+
+
+# --- Прецедент 10.07.2026: "Exponenta High-Pro Малина-Банан (протеиновый кефир)"
+# 250г получил 16.2г клетчатки от ключа "малин" (6.5/100г, для настоящей малины),
+# хотя "Малина-Банан" здесь — вкус ароматизатора, а не ингредиент. У протеинового
+# кефира клетчатки нет. Специфичные ключи для протеиновых напитков должны стоять
+# ДО fruit-секции.
+
+
+def test_protein_drink_flavor_name_not_misdetected_as_fruit():
+    assert estimate_fiber("Exponenta High-Pro Малина-Банан (протеиновый кефир)", 250) == 0.0
+    assert fiber_per_100g("Протеиновый кефир вкус клубника-банан") == 0.0
+    assert fiber_per_100g("Exponenta High-Pro") == 0.0

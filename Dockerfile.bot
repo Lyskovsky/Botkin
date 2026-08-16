@@ -11,7 +11,12 @@ RUN pip wheel --no-cache-dir --wheel-dir /wheels -r requirements.txt
 # ---- runtime: slim без gcc, non-root, код в образе ----
 FROM python:3.11-slim AS runtime
 # psql/pg_dump нужны скриптам в /app/scripts.
-RUN apt-get update && apt-get install -y --no-install-recommends postgresql-client \
+# libpango/libgdk-pixbuf/libcairo + fontconfig + шрифт с кириллицей (DejaVu) — рантайм weasyprint
+# для PDF-отчёта врачу (#290). shared-mime-info нужен gdk-pixbuf для распознавания типов.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    postgresql-client \
+    libpango-1.0-0 libpangocairo-1.0-0 libgdk-pixbuf-2.0-0 libcairo2 \
+    libffi8 fontconfig shared-mime-info fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 

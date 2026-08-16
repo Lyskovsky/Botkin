@@ -36,7 +36,7 @@ sys.path.insert(0, str(project_root))
 
 from config import get_settings
 from database import SessionLocal
-from database.models import User
+from database.models import User, log_event
 
 logger = logging.getLogger(__name__)
 
@@ -90,11 +90,14 @@ TOOLS: list[dict[str, Any]] = [
         "description": (
             "Контекст для вопросов «что мне съесть / что ещё можно сейчас / что на ужин»: остаток "
             "КБЖУ на сегодня (target/consumed/remaining), съеденные макросы, ОГРАНИЧЕНИЯ-ДИАГНОЗЫ "
-            "(constraints) и любимые продукты юзера — всё ОДНИМ вызовом. При таких вопросах зови "
-            "ЭТОТ tool вместо нескольких отдельных. По результату дай СРАЗУ 2-3 конкретных варианта "
-            "под остаток калорий и под constraints (диагнозы — критично: подагра, демпинг и т.п.); "
-            "уточняющий вопрос («где ты», «что дома») задавай ТОЛЬКО если без него никак, не гоняй "
-            "юзера по 3-4 репликам."
+            "(constraints), АЛЛЕРГИИ (allergies) и любимые продукты юзера — всё ОДНИМ вызовом. "
+            "При таких вопросах зови ЭТОТ tool вместо нескольких отдельных. По результату дай "
+            "СРАЗУ 2-3 конкретных варианта под остаток калорий, под constraints (диагнозы — "
+            "критично: подагра, демпинг и т.п.) и БЕЗ продуктов из allergies; уточняющий вопрос "
+            "(«где ты», «что дома») задавай ТОЛЬКО если без него никак, не гоняй юзера по 3-4 "
+            "репликам. constraints_source показывает откуда взяты диагнозы: kb (knowledge base), "
+            "onboarding (со слов пациента / из его документов) или none (данных нет — не "
+            "выдумывай ограничения)."
         ),
         "input_schema": {"type": "object", "properties": {}},
     },
@@ -165,7 +168,9 @@ TOOLS: list[dict[str, Any]] = [
             "ВСЕГДА зови это первым, если юзер спрашивает про специфичный вид обследования "
             "(ЭхоКГ, холтер, МРТ, КТ, операции, текущие препараты, диагнозы) и ты не уверен "
             "под каким именно ключом эти данные лежат. Для каждого ключа возвращает "
-            "type (list/dict) и count — видно есть ли там данные или секция пустая."
+            "type (list/dict) и count — видно есть ли там данные или секция пустая. "
+            "Ключ `documents` — файлы, которые пользователь сам загрузил через /doc "
+            "(заключения врачей, УЗИ, выписки, сканы анализов)."
         ),
         "input_schema": {"type": "object", "properties": {}},
     },
@@ -176,8 +181,14 @@ TOOLS: list[dict[str, Any]] = [
             "'blood_tests.0.values.cholesterol'). Распространённые ключи: 'blood_tests', "
             "'hormones', 'vitamins', 'ultrasound', 'ecg', 'echocardiogram', 'holter_ecg', "
             "'current_medications', 'medications', 'chronic_diagnoses', 'diagnoses', "
-            "'operations', 'imaging', 'mrt', 'endoscopy', 'cardio'. ВАЖНО: если не уверен "
-            "какой именно ключ есть у этого юзера — сначала позови `list_kb_keys`."
+            "'operations', 'imaging', 'mrt', 'endoscopy', 'cardio', 'documents'. "
+            "'documents' — то, что пользователь загрузил через /doc: "
+            "'documents.0.extracted' даёт дату, лабораторию и распознанный текст документа, "
+            "'documents.0.file' — имя файла. Полезно для НЕлабораторных документов "
+            "(заключение врача, УЗИ) и чтобы сослаться на конкретный файл. "
+            "Числовые лабораторные показатели из загруженных документов спрашивать здесь НЕ надо — "
+            "они уже лежат в blood_tests, бери их через get_recent_biomarkers. "
+            "ВАЖНО: если не уверен какой именно ключ есть у этого юзера — сначала позови `list_kb_keys`."
         ),
         "input_schema": {
             "type": "object",
@@ -245,6 +256,26 @@ TOOLS: list[dict[str, Any]] = [
         "input_schema": {
             "type": "object",
             "properties": {"days": {"type": "integer", "minimum": 1, "maximum": 180, "default": 30}},
+        },
+    },
+    {
+        "name": "get_supplement_daily_log",
+        "description": (
+            "Для КОРРЕЛЯЦИОННОГО анализа приёма добавки с метриками по дням "
+            "(напр. «влияет ли магний на качество сна», «алкоголь и HRV»). "
+            "В отличие от get_recent_supplements (только агрегаты), возвращает "
+            "для каждой добавки список ДАТ приёма (taken_dates) за период + "
+            "границы окна [start_date, end_date]. День без даты в списке = "
+            "не принимал → можно сопоставлять с get_recent_sleep / get_recent_bp "
+            "и т.п. по дням. Опц. параметр supplement — фильтр по одному "
+            "препарату (подстрока имени). Период по умолчанию 30 дней."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "days": {"type": "integer", "minimum": 1, "maximum": 180, "default": 30},
+                "supplement": {"type": "string", "description": "опц. фильтр по имени добавки (подстрока)"},
+            },
         },
     },
     {
@@ -463,6 +494,36 @@ TOOLS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "save_health_profile",
+        "description": (
+            "Сохранить медпрофиль СО СЛОВ пользователя: хронические диагнозы/состояния "
+            "и/или аллергии. Зови когда пользователь сам упомянул диагноз, хроническую "
+            "болячку, постоянное лекарство или аллергию — или когда ответил на твой "
+            "вопрос про это. Записывай короткими пунктами как сказал человек "
+            "(«Гипотиреоз, принимаю Эутирокс 50 мкг»), НЕ переформулируй в диагнозы, "
+            "которых он не называл. Дубли отсекаются автоматически. Если у пользователя "
+            "ничего нет или он не хочет отвечать — вызови с nothing_to_report=true: "
+            "это пометит, что вопрос задан, и больше спрашивать не нужно. НЕ придумывай "
+            "содержимое сам и НЕ переноси сюда диагнозы из документов или KB — документы "
+            "попадают в профиль своим путём (/doc)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "chronic_conditions": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Хронические диагнозы/состояния и постоянные лекарства, как назвал пользователь",
+                },
+                "allergies": {"type": "array", "items": {"type": "string"}},
+                "nothing_to_report": {
+                    "type": "boolean",
+                    "description": "true — пользователю нечего сообщить или он не хочет отвечать",
+                },
+            },
+        },
+    },
+    {
         "name": "update_user_settings",
         "description": (
             "Изменить настройки в user_settings table: target_weight_kg + target_weight_date "
@@ -557,7 +618,8 @@ TOOLS: list[dict[str, Any]] = [
             "НЕ передавай (запишется на сегодня). После записи ОБЯЗАТЕЛЬНО назови "
             "дату в ответе, если она не сегодняшняя («записал на 29 мая»).\n\n"
             "When handling addendum messages ('забыл добавить', 'забыл упомянуть', etc.): "
-            "first call get_recent_meals(days=1) to find the most recent meal slot, "
+            "first call get_recent_meals(days=2) to find the most recent meal slot "
+            "(days=2 to catch yesterday's meals — users often write in the morning about yesterday), "
             "then use that same slot parameter when calling log_meal_text."
         ),
         "input_schema": {
@@ -624,12 +686,22 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "log_supplement",
-        "description": "Залогировать приём добавки/витамина.",
+        "description": (
+            "Залогировать приём добавки/витамина. Если та же добавка уже логировалась "
+            "в этот день, вернётся status=duplicate_warning и запись НЕ создастся — "
+            "уточни у пользователя, реально ли это повторный приём, и при подтверждении "
+            "повтори вызов с force=true. Описание схемы приёма («принимаю утром…») — "
+            "НЕ повод логировать: логируй только фактический приём."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "supplement_name": {"type": "string"},
                 "dosage": {"type": "string"},
+                "force": {
+                    "type": "boolean",
+                    "description": "true — записать несмотря на duplicate_warning (подтверждённый повторный приём)",
+                },
             },
             "required": ["supplement_name"],
         },
@@ -712,6 +784,31 @@ TOOLS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "generate_doctor_report",
+        "description": (
+            "Сгенерировать и ОТПРАВИТЬ пользователю PDF-отчёт о здоровье для врача. "
+            "Tool сам шлёт PDF Telegram-документом — тебе НЕ надо ничего прикладывать, "
+            "файл уже в чате к моменту результата. После вызова напиши КОРОТКОЕ "
+            "подтверждение (1-2 предложения): отчёт отправлен, его можно переслать врачу.\n\n"
+            "КОГДА ИСПОЛЬЗОВАТЬ: пользователь просит «отчёт для врача», «сводку для доктора», "
+            "«выгрузи мои данные для приёма», «PDF для врача». Отчёт — секции в клиническом "
+            "порядке (проблемы, аллергии, лекарства, результаты анализов, витальные, образ жизни). "
+            "Это НЕ график динамики — для инфографики используй render_report.\n\n"
+            "ЯЗЫК: если пользователь просит отчёт на английском (или пишет по-английски) — "
+            "передай language='en'; для русского — 'ru'. Не указан — язык по умолчанию."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "language": {
+                    "type": "string",
+                    "enum": ["ru", "en"],
+                    "description": "Язык отчёта: 'en' если пользователь просит на английском, иначе 'ru'.",
+                },
+            },
+        },
+    },
+    {
         "name": "add_agent_correction",
         "description": (
             "Сохранить поправку или новый факт в KB пользователя. "
@@ -728,6 +825,83 @@ TOOLS: list[dict[str, Any]] = [
                 "reason": {"type": "string", "description": "Откуда факт — цитата или пересказ слов пользователя"},
             },
             "required": ["key", "value"],
+        },
+    },
+    {
+        "name": "flag_for_devs",
+        "description": (
+            "Зафиксировать пожелание/багрепорт пользователя для разработчиков. "
+            "Вызывай, когда: не смог закрыть запрос (нет тула/данных), пользователь "
+            "недоволен/переспрашивает, или прямо указал на баг/пожелание."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "category": {
+                    "type": "string",
+                    "enum": ["bug", "feature", "question"],
+                    "description": "Тип: баг / пожелание фичи / вопрос.",
+                },
+                "user_msg": {"type": "string", "description": "Суть запроса словами пользователя."},
+                "agent_note": {"type": "string", "description": "Твоя короткая заметка для разработчиков."},
+            },
+            "required": ["category", "user_msg"],
+        },
+    },
+    {
+        "name": "list_feedback",
+        "description": (
+            "АДМИН-ТУЛ (#269): показать записи инбокса обратной связи для триажа. "
+            "Возвращает структурный список (id/kind/status/priority/text/agent_note/…). "
+            "По умолчанию status='new'; status='all' — все статусы."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "description": "Фильтр статуса: new/triaged/in_progress/done/wontfix/duplicate или 'all'.",
+                },
+                "limit": {"type": "integer", "description": "Сколько записей (макс 100, дефолт 20)."},
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "triage_feedback",
+        "description": (
+            "АДМИН-ТУЛ (#269): триаж записи инбокса — сменить статус/приоритет/привязать "
+            "GitHub-issue. Частичное обновление: передавай только меняемые поля. "
+            "Возвращает обновлённую запись.\n"
+            "Фаза 3 (#188): при переводе в done/wontfix бот САМ шлёт автору уведомление о "
+            "разборе (один раз, guard по notified_at). Для вопроса (kind=question) передай "
+            "`notify_text` — твой человеческий ответ уйдёт автору напрямую и закроет обращение. "
+            "В ответе поля `notified` и `notify_skipped` (opt_out/already_notified/send_failed)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "feedback_id": {"type": "integer", "description": "id записи из list_feedback."},
+                "status": {
+                    "type": "string",
+                    "enum": ["new", "triaged", "in_progress", "done", "wontfix", "duplicate"],
+                    "description": "Новый статус.",
+                },
+                "priority": {
+                    "type": "string",
+                    "enum": ["P0", "P1", "P2", "P3"],
+                    "description": "Приоритет.",
+                },
+                "github_issue": {"type": "string", "description": "Номер GitHub-issue (напр. '300')."},
+                "notify_text": {
+                    "type": "string",
+                    "description": (
+                        "Явный ответ автору (перекрывает авто-текст, уходит при любом статусе). "
+                        "Используй для kind=question, чтобы ответить человеку по существу."
+                    ),
+                },
+            },
+            "required": ["feedback_id"],
         },
     },
 ]
@@ -854,6 +1028,16 @@ def _call_tool(name: str, args: dict, token: str) -> str:
                 headers=headers,
                 timeout=15,
             )
+        elif name == "get_supplement_daily_log":
+            params = {"days": int(args.get("days", 30))}
+            if args.get("supplement"):
+                params["supplement"] = str(args["supplement"])
+            r = requests.get(
+                f"{TOOLS_API_BASE}/supplement_daily_log",
+                params=params,
+                headers=headers,
+                timeout=15,
+            )
         elif name == "get_recent_biomarkers":
             r = requests.get(
                 f"{TOOLS_API_BASE}/recent_biomarkers",
@@ -914,6 +1098,13 @@ def _call_tool(name: str, args: dict, token: str) -> str:
                 headers=headers,
                 timeout=15,
             )
+        elif name == "save_health_profile":
+            r = requests.post(
+                f"{TOOLS_API_BASE}/save_health_profile",
+                json=args,
+                headers=headers,
+                timeout=15,
+            )
         elif name == "update_user_settings":
             r = requests.post(
                 f"{TOOLS_API_BASE}/update_user_settings",
@@ -968,6 +1159,15 @@ def _call_tool(name: str, args: dict, token: str) -> str:
                 headers=headers,
                 timeout=30,
             )
+        elif name == "generate_doctor_report":
+            # Side-effect tool — генерит PDF-отчёт для врача и шлёт sendDocument
+            # (общий helper с кнопкой мини-аппа, #290/#291). language — #300.
+            r = requests.post(
+                f"{TOOLS_API_BASE}/doctor_report",
+                headers=headers,
+                json={"language": args.get("language")},
+                timeout=60,
+            )
         elif name == "render_chart":
             # Универсальный рендер через QuickChart.io. Side-effect — sendPhoto.
             r = requests.post(
@@ -990,6 +1190,37 @@ def _call_tool(name: str, args: dict, token: str) -> str:
                     "reason": args.get("reason", ""),
                 },
                 headers=headers,
+                timeout=10,
+            )
+        elif name == "flag_for_devs":
+            r = requests.post(
+                f"{TOOLS_API_BASE}/flag_for_devs",
+                headers=headers,
+                json={
+                    "category": args.get("category", "question"),
+                    "user_msg": args.get("user_msg", ""),
+                    "agent_note": args.get("agent_note"),
+                },
+                timeout=10,
+            )
+        elif name == "list_feedback":
+            r = requests.post(
+                f"{TOOLS_API_BASE}/list_feedback",
+                headers=headers,
+                json={"status": args.get("status", "new"), "limit": args.get("limit", 20)},
+                timeout=10,
+            )
+        elif name == "triage_feedback":
+            r = requests.post(
+                f"{TOOLS_API_BASE}/triage_feedback",
+                headers=headers,
+                json={
+                    "feedback_id": args.get("feedback_id"),
+                    "status": args.get("status"),
+                    "priority": args.get("priority"),
+                    "github_issue": args.get("github_issue"),
+                    "notify_text": args.get("notify_text"),
+                },
                 timeout=10,
             )
         else:
@@ -1159,6 +1390,71 @@ def _recent_tracker_events(db, user_id: int, limit: int = 8) -> str:
         + "\nДля точных цифр всё равно вызывай соответствующий инструмент.\n"
         "\n---\n\n"
     )
+
+
+def agent_last_turn_was_question(user_id: int, within_minutes: int = 10) -> bool:
+    """#198: True если ПОСЛЕДНИЙ ход бота — вопрос агента (BotkinClaw), свежий и
+    заканчивается «?».
+
+    Нужно, чтобы короткий ответ пользователя («54», «120/80») после вопроса
+    агента («сколько весишь?») уходил в агента, а не перехватывался weight/BP-
+    парсером (диалог рвался). Берём АБСОЛЮТНО последний assistant-ход: если это
+    парсер-подтверждение (source bp_fast_handler/llm_text/…) или старый ход
+    (>within_minutes) — False, чтобы не спутать standalone-лог с ответом.
+    """
+    from sqlalchemy import text as sql_text
+    from datetime import datetime, timezone, timedelta
+
+    def _text_of(content) -> str:
+        data = content
+        if isinstance(data, str):
+            try:
+                data = json.loads(data)
+            except Exception:
+                return data
+        if isinstance(data, list):
+            return " ".join(b.get("text", "") for b in data if isinstance(b, dict) and b.get("type") == "text")
+        return ""
+
+    try:
+        db = SessionLocal()
+    except Exception:
+        return False
+    try:
+        row = db.execute(
+            sql_text(
+                """
+                SELECT content, source, created_at
+                FROM agent_conversations
+                WHERE user_id = :uid AND role = 'assistant'
+                ORDER BY id DESC
+                LIMIT 1
+                """
+            ),
+            {"uid": user_id},
+        ).fetchone()
+        if row is None:
+            return False
+        content, source, created_at = row
+        # Только реальный ход агента, не парсер-инъекция.
+        if source not in (None, "botkinclaw"):
+            return False
+        if created_at is None:
+            return False
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=timezone.utc)
+        if datetime.now(timezone.utc) - created_at > timedelta(minutes=within_minutes):
+            return False
+        # #198: вопрос агента часто кончается эмодзи/пунктуацией после «?»
+        # («Какой вес записать? 😊») — простой endswith("?") давал False, и
+        # короткий ответ юзера перехватывался парсером. Матчим «?», за которым до
+        # конца строки идут только не-словесные символы (эмодзи, пробелы, скобки),
+        # но НЕ буквы/цифры — так «? 😊» и «?» True, а «? Напиши число» False.
+        return bool(re.search(r"\?[\s\W]*$", _text_of(content)))
+    except Exception:
+        return False
+    finally:
+        db.close()
 
 
 def _validate_history(messages: list[dict]) -> list[dict]:
@@ -1553,6 +1849,65 @@ def _save_message(
     )
 
 
+def _end_open_tx(db) -> None:
+    """Закрыть открытую транзакцию перед долгим сетевым вызовом.
+
+    Прод-инцидент #347 (26.07.2026): ask_agent держал транзакцию открытой
+    поперёк ``requests.post`` к Anthropic (до 60с на вызов), а session-level
+    ``idle_in_transaction_session_timeout=15000`` (см. database/__init__.py)
+    рвал такое соединение. Следующий INSERT падал с OperationalError, и
+    пользователь вместо готового ответа получал «что-то сломалось». Соединение
+    БЕЗ открытой транзакции этот тайм-аут не трогает.
+
+    Транзакцию открывают не только записи: после ``db.commit()`` ORM-объект
+    ``user`` истекает (expire_on_commit=True по умолчанию), и любое чтение его
+    атрибута тянет refresh-SELECT — то есть снова открывает транзакцию.
+    """
+    try:
+        db.commit()
+    except Exception:
+        logger.exception("agent_chat: commit перед вызовом Anthropic не удался — откатываю")
+        try:
+            db.rollback()
+        except Exception:
+            logger.exception("agent_chat: rollback после неудачного commit тоже не удался")
+
+
+def _persist_turns(db, user_id: int, turns: list[tuple[str, str | list[dict]]], source: str) -> None:
+    """Сохранить один или несколько turn'ов диалога ОДНОЙ транзакцией.
+
+    #347, две задачи разом:
+
+    1. Сбой БД не должен съедать уже готовый ответ: раньше OperationalError на
+       INSERT всплывал наружу, сгенерированный (и оплаченный) ответ
+       выбрасывался, пользователь видел «что-то сломалось». Теперь сбой только
+       логируется.
+    2. Пара ``assistant``(tool_use) + ``tool_result`` пишется атомарно. Если
+       сохранить tool_use и потерять tool_result, следующий ``ask_agent``
+       поднимет из БД осиротевший tool_use — Anthropic отвечает 400 на такую
+       историю. ``_validate_history`` её вычистит, но вместе с контекстом того
+       хода, причём молча. Атомарность убирает саму возможность рассинхрона.
+
+    Широкий ``except Exception`` — намеренно: смысл функции в том, чтобы НИКАКОЙ
+    сбой персистентности не мешал отдать оплаченный ответ. Traceback пишется в
+    лог целиком, ошибка не глотается молча.
+    """
+    try:
+        for role, content in turns:
+            _save_message(db, user_id, role, content, source=source)
+        db.commit()
+    except Exception:
+        logger.exception(
+            "agent_chat: turn'ы не сохранены (roles=%s user=%s) — ответ пользователю всё равно отдаём",
+            [role for role, _ in turns],
+            user_id,
+        )
+        try:
+            db.rollback()
+        except Exception:
+            logger.exception("agent_chat: rollback после сбоя сохранения не удался")
+
+
 def log_router_raw_text(user_id: int, raw_text: str, msg_type: str) -> None:
     """Логирует raw текст сообщения, ушедшего НЕ в BotkinClaw, а в роутер
     (food / vitamins / bp / weight / mixed / body_measurements).
@@ -1605,6 +1960,7 @@ _TOOL_PROGRESS_LABEL = {
     # Read tools
     "get_recent_meals": "🍽 собираю питание",
     "get_recent_supplements": "💊 смотрю добавки",
+    "get_supplement_daily_log": "💊 сверяю приём добавок по дням",
     "get_recent_bp": "🩸 поднимаю давление",
     "get_recent_glucose": "🩸 смотрю глюкозу",
     "get_glucose_stats": "🩸 считаю TIR",
@@ -1636,10 +1992,12 @@ _TOOL_PROGRESS_LABEL = {
     "log_bp": "✍️ записываю давление",
     "regenerate_health_token": "🔑 пересоздаю токен",
     "update_profile_questionnaire": "📝 обновляю анкету",
+    "save_health_profile": "📝 записываю медпрофиль",
     "update_user_settings": "⚙️ обновляю настройки",
     # Render tools
     "render_report": "🎨 рисую график",
     "render_chart": "🎨 рисую график",
+    "generate_doctor_report": "📄 готовлю отчёт для врача",
 }
 
 
@@ -1665,27 +2023,184 @@ def build_default_agent_prompt(user) -> str:
         bits.append(sex_ru)
     who = name + (f" ({', '.join(bits)})" if bits else "")
 
-    return (
+    # Медпрофиль приклеивается к промпту отдельным блоком (_health_profile_block).
+    # Если он непустой — не утверждаем обратное строкой ниже (#340): агент верил
+    # базовой фразе и советовал как здоровому, игнорируя блок с диагнозами.
+    history_line = (
+        "Подробной истории обследований в системе может не быть, но медицинский "
+        "профиль пациента есть — он в блоке «Медпрофиль» ниже, учитывай его. "
+        "Помогай освоиться и подсказывай, как пользоваться ботом, когда уместно.\n\n"
+        if _has_health_profile(user)
+        else "Это пользователь без подробной медицинской истории в системе — помогай "
+        "освоиться и подсказывай, как пользоваться ботом, когда уместно.\n\n"
+    )
+
+    base = (
         f"Ты — личный AI-агент по теме здоровья для пользователя {name}. "
         "Часть проекта Botkin (botkin.health), канал Telegram @Botkin_md_bot.\n\n"
         "## Пользователь\n\n"
         f"**{who}.** Цель: {goal}.\n"
-        "Это пользователь без подробной медицинской истории в системе — помогай "
-        "освоиться и подсказывай, как пользоваться ботом, когда уместно.\n\n"
+        f"{history_line}"
         "## Что ты умеешь и как пользователь это делает\n\n"
         "- **Логирование еды** — пользователь пишет «съел банан и кофе», шлёт фото "
         "тарелки или голосовое; ты распознаёшь и считаешь калории/БЖУ. На вопрос "
         "«как вносить еду» — объясни этими словами с примерами.\n"
-        "- **Добавки и витамины** — «выпил витамин D» логируется как приём.\n"
-        "- **Анализы крови** — пользователь кидает PDF/фото анализов, ты разбираешь показатели.\n"
+        "- **Добавки и витамины** — «выпил витамин D» логируется как приём. Фото упаковки "
+        "добавки распознаёт отдельный модуль (пользователь подтверждает кнопкой), сам снимок "
+        "тебе не виден, но результат появляется в get_recent_supplements. При вопросах о "
+        "добавках или схеме приёма СНАЧАЛА вызови get_recent_supplements и get_user_settings; "
+        "не проси переписывать схему текстом, если она уже есть в данных или истории диалога.\n"
+        "- **Анализы крови** — пользователь кидает PDF/фото анализов через /doc, ты разбираешь "
+        "показатели. После подтверждения они попадают в динамику: видны в get_recent_biomarkers, "
+        "на дашборде и в расчёте биологического возраста. Сам документ лежит в секции "
+        "`documents` карты здоровья (get_kb_value).\n"
         "- **Дашборд и отчёты** — биологический возраст (PhenoAge), динамика по месяцам.\n"
-        "- **Wearables** — Garmin, Apple Health, Google Health.\n"
+        "- **Wearables и каналы данных** — реально существующие интеграции: Garmin (прямая), "
+        "Apple Health (Health Auto Export или iOS Shortcut, команда /health_token), "
+        "**Android Health Connect** (шаги/вес/пульс/давление/VO2; Mi Fitness, Samsung Health, "
+        "Huawei Health и др. пишут в Health Connect — настройка через Александра), "
+        "CGM-глюкоза FreeStyle Libre (/connect_cgm). НЕ говори, что интеграции с "
+        "Google Health/Android нет — она есть через Health Connect.\n"
         "- **Вопросы о здоровье** — питание, сон, активность, корреляции в данных.\n\n"
         "## Данные пользователя — через tools\n\n"
         "Бери цифры из tools (get_recent_biomarkers, get_recent_meals, get_recent_supplements, "
         "вес/тело, сон, давление). Не угадывай. Если данных ещё нет (новый пользователь) — "
         "так и скажи и предложи начать логировать.\n"
     )
+
+    from core.personas import get_persona
+
+    persona = get_persona(data.get("persona"))
+    tone_block = (
+        "\n\n## Стиль общения\n\n"
+        f"Общайся в манере «{persona.display}»: {persona.tone_prompt}.\n"
+        "Это стиль, а не содержание — факты и цифры всегда бери из tools."
+    )
+    return base + tone_block
+
+
+# users.smoking_status → человекочитаемо для промпта (#340). Курение спрашивает
+# онбординг (шаг 8, нужен для PhenoAge), но до агента оно раньше не доходило:
+# видели только дашборд и /user_profile.
+SMOKING_RU: dict[str, str] = {
+    "never": "не курит",
+    "former": "бросил",
+    "current": "курит",
+    "occasional": "курит изредка",
+}
+
+
+def _has_health_profile(user) -> bool:
+    """Есть ли у пользователя аллергии или хронические диагнозы в профиле.
+
+    Курение сюда НЕ входит: оно есть почти у каждого (обязательный шаг
+    онбординга) и само по себе медицинской историей не является.
+    """
+    from core.health.onboarding_lists import ALLERGY_KEYS, CONDITION_KEYS, onboarding_list
+
+    data = getattr(user, "onboarding_data", None) or {}
+    return bool(onboarding_list(data, ALLERGY_KEYS) or onboarding_list(data, CONDITION_KEYS))
+
+
+def _health_profile_block(user) -> str:
+    """Живой блок медпрофиля (аллергии/диагнозы/курение) для промпта.
+
+    Пусто по всем источникам → пустая строка (не шумим). Аллергии и диагнозы
+    читаются из тех же ключей ``onboarding_data``, куда пишет
+    merge_onboarding_lists, поэтому агент видит свежие данные сразу после
+    /doc-сохранения (промпт пересобирается на каждый вызов ask_agent).
+    Курение — из ``users.smoking_status``.
+    """
+    from core.health.onboarding_lists import ALLERGY_KEYS, CONDITION_KEYS, onboarding_list
+
+    data = getattr(user, "onboarding_data", None) or {}
+    allergies = onboarding_list(data, ALLERGY_KEYS)
+    conditions = onboarding_list(data, CONDITION_KEYS)
+    smoking = SMOKING_RU.get(getattr(user, "smoking_status", None) or "")
+    if not allergies and not conditions and not smoking:
+        return ""
+    lines = ["\n\n## Медпрофиль (со слов пациента / из документов)"]
+    if allergies:
+        lines.append(f"Аллергии: {', '.join(allergies)}")
+    if conditions:
+        lines.append(f"Хронические диагнозы: {', '.join(conditions)}")
+    if smoking:
+        lines.append(f"Курение: {smoking}")
+    lines.append("Учитывай при советах (лекарства, продукты, триггеры).")
+    return "\n".join(lines)
+
+
+def _health_profile_ask_block(user) -> str:
+    """Мягкий сбор медпрофиля: инструкция спросить ОДИН раз (#340).
+
+    Онбординг-квиз про хроники и постоянные лекарства не спрашивает (шаг убран
+    в f366c98 ради короткого квиза), а у самозарегистрированного юзера нет ни
+    KB, ни документов — медконтекста нет вообще. Поэтому просим агента добрать
+    это в диалоге, но ровно один раз: после ответа он зовёт save_health_profile,
+    который ставит ``health_profile_asked``.
+
+    Пустая строка, если профиль уже есть, вопрос уже задавали или у юзера
+    задан индивидуальный ``agent_system_prompt``: такой промпт собран из
+    PROFILE.md/KB (onboard_family_user.py), медистория там уже подробная —
+    спрашивать про хроники значит переспрашивать то, что агент и так знает.
+    """
+    data = getattr(user, "onboarding_data", None) or {}
+    if (getattr(user, "agent_system_prompt", None) or "").strip():
+        return ""
+    if data.get("health_profile_asked") or _has_health_profile(user):
+        return ""
+    return (
+        "\n\n## Медпрофиль ещё не собран\n"
+        "Про хронические болячки и постоянные лекарства пользователя мы не знаем — "
+        "онбординг об этом не спрашивает. Спроси ОДИН раз, мягко и к месту (когда "
+        "разговор и так про здоровье, самочувствие, еду или анализы). Не начинай с "
+        "этого диалог, не повторяй вопрос в каждом ответе и не превращай его в анкету. "
+        "Что услышал — сохрани через save_health_profile. Если человеку нечего "
+        "сообщить или он не хочет отвечать — вызови save_health_profile с "
+        "nothing_to_report=true и больше не спрашивай."
+    )
+
+
+# Admin-контекст-блок системного промпта (#337). Admin-статус (BOTKIN_ADMIN_IDS) —
+# отдельная ось от когорты данных (owner/family/…): когорта ограничивает видимость
+# чужих данных, admin-статус даёт право на операционные действия. Без явного сигнала
+# LLM гадает по family-персоне и отказывает админу в триаже фидбека.
+ADMIN_CONTEXT_PROMPT = (
+    "# 🛡 ТЫ ОБЩАЕШЬСЯ С АДМИНИСТРАТОРОМ BOTKIN\n"
+    "\n"
+    "Текущий пользователь — администратор системы (входит в BOTKIN_ADMIN_IDS). Его\n"
+    "admin-статус НЕ зависит от когорты данных (owner/family/early_user/external):\n"
+    "когорта ограничивает видимость чужих данных, а admin-статус даёт право на\n"
+    "операционные действия с ботом.\n"
+    "\n"
+    "Поэтому: если админ просит показать очередь обратной связи или разобрать обращение\n"
+    "(сменить статус/приоритет, ответить автору) — ВЫЗОВИ `list_feedback` / `triage_feedback`\n"
+    "и выполни. НЕ отказывай со ссылкой на когорту («ты family-пользователь») — эти\n"
+    "инструменты доступны тебе именно потому, что пользователь администратор.\n"
+    "\n"
+    "---\n"
+    "\n"
+)
+
+
+def build_admin_context(is_admin: bool) -> str:
+    """Admin-контекст-блок для системного промпта агента (#337).
+
+    Пустая строка для обычных пользователей. Для админов — явный сигнал, что
+    admin-статус (BOTKIN_ADMIN_IDS) — отдельная ось от когорты данных, чтобы LLM
+    не отказывал в триаже фидбека, приняв себя за «family-only» ассистента.
+    """
+    return ADMIN_CONTEXT_PROMPT if is_admin else ""
+
+
+def _log_first_question(db, user_id: int, is_e2e: bool) -> None:
+    """E6: первое свободное сообщение агенту (once). Пропускаем E2E-прогоны."""
+    if is_e2e:
+        return
+    try:
+        log_event(db, user_id=user_id, event="first_agent_question", once=True)
+    except Exception:
+        logger.exception("E6 first_agent_question log failed for %s", user_id)
 
 
 def ask_agent(
@@ -1715,6 +2230,8 @@ def ask_agent(
         if not user or not user.is_active:
             raise RuntimeError(f"User {user_id} not found or inactive")
 
+        _log_first_question(db, user_id, is_e2e)
+
         token = _generate_jwt(user)
 
         # Прогресс «думаю» сразу после провижна — пользователь видит что бот
@@ -1733,6 +2250,9 @@ def ask_agent(
         history.append({"role": "user", "content": user_text})
 
         # Persist user turn immediately so a crash mid-call doesn't lose it.
+        # Намеренно НЕ через _persist_turns: тут сбой БД должен всплыть наружу.
+        # Ответа ещё нет (сеть даже не тронута), терять нечего, а работать
+        # дальше с мёртвой БД смысла нет — tools всё равно не ответят.
         _save_message(db, user_id, "user", user_text, source=src)
         db.commit()
 
@@ -1793,6 +2313,17 @@ def ask_agent(
             "калорий и под ограничения (диагнозы — критично: подагра, демпинг и т.п.).\n"
             "НЕ гоняй юзера по 3-4 уточняющим репликам («где ты?», «что дома?») —\n"
             "уточняй только если без этого реально никак.\n"
+            "\n"
+            "## Демпинг / реактивная гипогликемия / постбариатрия — низкоГИ по умолчанию\n"
+            "Если в `constraints` из `meal_context` (или в KB-диагнозах) есть демпинг-\n"
+            "синдром, реактивная гипогликемия или постбариатрическое состояние —\n"
+            "АКТИВНО предлагай низкогликемические варианты и замены, а не «привычное»:\n"
+            "- цельное зерно вместо белого хлеба/белого риса, бобовые, НЕ-быстрый овёс,\n"
+            "  цельный фрукт вместо сухофруктов/сока; белок и жир — вперёд углеводов.\n"
+            "- избегай быстрых сахаров и высокоГИ на голодный желудок (запускают\n"
+            "  реактивную гипо у таких пациентов).\n"
+            "Это гейтится диагнозом: у кого таких ограничений в constraints/KB НЕТ —\n"
+            "совет НЕ меняется, обычные варианты под остаток калорий.\n"
             "\n"
             "---\n"
             "\n"
@@ -1911,7 +2442,7 @@ def ask_agent(
             "❌ ЗАПРЕЩЕНО генерировать ингредиенты, которых нет в items.\n"
             "\n"
             "## Коррекция типа приёма («это не перекус, это обед» и т.п.)\n"
-            "1. ВЫЗОВИ get_recent_meals(days=1) → получи meal_id нужной записи.\n"
+            "1. ВЫЗОВИ get_recent_meals(days=2) → получи meal_id нужной записи.\n"
             '2. ВЫЗОВИ edit_meal(meal_id=..., new_slot="lunch"/"breakfast"/"dinner"/"snack").\n'
             "3. Только после успешного ответа edit_meal — сообщи «✅ Готово».\n"
             "\n"
@@ -1924,17 +2455,23 @@ def ask_agent(
             "\n"
             "---\n"
             "\n"
-            "# 📅 ПОИСК ЕДЫ: НЕ СДАВАЙСЯ ПОСЛЕ ПЕРВОГО ЗАПРОСА (универсальный)\n"
+            "# 📅 ПОИСК ЕДЫ: ВСЕГДА НАЧИНАЙ С days=2 (универсальный)\n"
             "\n"
-            'Если `get_recent_meals(days=1)` вернул пустой список (`"meals": []`) —\n'
+            "При ЛЮБОМ контекстном вопросе о еде («мой боул», «та запись», «что я ела»,\n"
+            "«за мой ужин», «это был не перекус») — вызывай get_recent_meals(days=2),\n"
+            "НЕ days=1. Пользователи часто пишут утром про вчерашнюю еду.\n"
+            "\n"
+            'Если даже days=2 вернул пустой список (`"meals": []`) —\n'
             "ОБЯЗАТЕЛЬНО повтори с `days=3` перед тем как делать вывод «данных нет».\n"
             "\n"
-            "Пользователи часто пишут утром про вчерашнюю еду — данные могут лежать\n"
-            "вчера или позавчера.\n"
-            "\n"
             "❌ ЗАПРЕЩЕНО:\n"
+            "- Начинать с get_recent_meals(days=1) при контекстных вопросах о конкретной записи\n"
             "- Говорить «данные за сегодня пустые» без повторного запроса с days=3\n"
             "- Предлагать «перенести записи на сегодня» — записи лежат на правильную дату\n"
+            "\n"
+            "Прецедент 20.06.2026 (#183): Кристина написала «за мой боул ещё числится как\n"
+            "перекус», агент вызвал days=1 → пустой список (боул был вчера) → предложил\n"
+            "«перенести записи на сегодня» — что полностью неверно.\n"
             "\n"
             "---\n"
             "\n"
@@ -2021,6 +2558,19 @@ def ask_agent(
             "каждом следующем диалоге их не всплывает. Это критическая ошибка "
             "которую мы закрываем. Лучше один раз напомнить чем не напомнить.\n"
             "\n"
+            "## Подготовка вопросов врачу (doctor-prep) — не подавай один препарат «ключевым»\n"
+            "Когда готовишь пользователю вопросы к врачу или разбираешь его терапию —\n"
+            "НЕ подавай один препарат как единственно «ключевой» / «надо возобновить».\n"
+            "Предлагай обсудить ВАРИАНТЫ (плюсы/минусы под его состояние); назначение\n"
+            "и выбор — за врачом. Формулируй как «спросить врача, подходит ли …», без\n"
+            "доз и без «принимай».\n"
+            "Особенно при демпинг-синдроме / реактивной гипогликемии (диагноз из KB):\n"
+            "проблема — ПОСТпрандиальные гипо, а метформин снижает БАЗАЛЬНУЮ глюкозу,\n"
+            "т.е. это не мишень. Обязательно упомяни АКАРБОЗУ как вариант первой линии\n"
+            "для обсуждения с врачом (замедляет всасывание углеводов → сглаживает\n"
+            "постпрандиальный пик). Не подавай метформин как «ключевой» при демпинге.\n"
+            "У кого такого диагноза в KB нет — поведение не меняется.\n"
+            "\n"
             "---\n"
             "\n"
             "# 🧠 ПАМЯТЬ ДИАЛОГА (универсальный)\n"
@@ -2106,6 +2656,16 @@ def ask_agent(
             "цифры (мг пуринов на 100 г, ккал, нормы) давай как «примерно» и "
             "только если уверен — лучше диапазон, чем точное выдуманное число.\n"
             "\n"
+            "4️⃣ НЕ называй высокогликемические продукты «медленными углеводами». "
+            "Белый хлеб, сухофрукты, белый рис, каши быстрого приготовления, "
+            "сладкое — это высокий ГИ; классифицируй честно, не выдавай за "
+            "«медленные». Это верно для всех, но особенно критично для пациентов "
+            "с демпингом/реактивной гипо — именно высокоГИ запускает у них "
+            "реактивную гипогликемию (см. блок meal_context).\n"
+            "   ❌ «рисовая каша с сухофруктами / белый хлеб — это медленные углеводы»\n"
+            "   ✅ «белый хлеб и сухофрукты — быстрые (высокий ГИ); медленные — это "
+            "цельное зерно, бобовые, овощи»\n"
+            "\n"
             "Цель: советы остаются полезными и по делу, но без псевдо-биохимии "
             "и завышенной уверенности. Пользователь может процитировать тебя "
             "своему врачу — не подставь его выдуманным механизмом.\n"
@@ -2190,6 +2750,17 @@ def ask_agent(
             "\n"
             "---\n"
             "\n"
+            "# 🛠 ОБРАТНАЯ СВЯЗЬ РАЗРАБОТЧИКАМ — flag_for_devs (универсальный)\n"
+            "\n"
+            "Когда ты упёрся (нет инструмента/данных под запрос), пользователь\n"
+            "недоволен/переспрашивает, или прямо сообщил о баге/пожелании —\n"
+            "ВЫЗОВИ `flag_for_devs(category, user_msg, agent_note)`, не замалчивай.\n"
+            "Это не мешает твоему ответу: флагни И продолжи помогать тем, что можешь.\n"
+            "После флага можешь коротко сказать пользователю, что передал разработчикам.\n"
+            "НЕ обещай сроки и НЕ выдумывай, что фича «уже в работе».\n"
+            "\n"
+            "---\n"
+            "\n"
         )
         # Семейный override (onboard_family_user.py) приоритетен; иначе — лёгкий
         # дефолт, чтобы разговорный агент работал у любого пользователя (#165).
@@ -2212,13 +2783,36 @@ def ask_agent(
         _date_line = (
             f"📅 Сегодня: {_now_local.strftime('%Y-%m-%d')} ({_weekday_ru}), "
             f"таймзона пользователя {_tz_name}. Все относительные даты «вчера», "
-            "«позавчера», «на той неделе» считай строго от этой даты.\n\n"
+            "«позавчера», «на той неделе» считай строго от этой даты. "
+            "Текущее время дня приходит отдельным системным блоком «⏰ Сейчас…» — "
+            "на любой вопрос о текущем времени/«сейчас» отвечай ТОЛЬКО по нему; "
+            "упоминания времени в сообщениях пользователя из истории устарели.\n\n"
         )
-        merged_system_prompt = _date_line + UNIVERSAL_META_PROMPT + per_user_prompt
+        from config.users import is_admin as _is_admin
+
+        # #337: сообщаем LLM об admin-статусе явно (иначе гадает по когорте и
+        # отказывает админу в триаже фидбека). Блок стабилен per-user → в
+        # кэшируемой части промпта, кэш не инвалидируется.
+        merged_system_prompt = (
+            _date_line
+            + UNIVERSAL_META_PROMPT
+            + per_user_prompt
+            + _health_profile_block(user)
+            + _health_profile_ask_block(user)
+            + build_admin_context(_is_admin(user_id))
+        )
         # Tracker-события (вес/еда/АД из парсеров) меняются КАЖДОЕ сообщение —
         # держим их ОТДЕЛЬНЫМ system-блоком БЕЗ cache_control, чтобы не
         # инвалидировать кэш стабильного промпта на каждый ход (#169 ревью).
-        tracker_block = _recent_tracker_events(db, user_id)
+        # ⏰ Текущее время юзера — тоже сюда (F-004, 02.07.2026): в кэшируемой
+        # _date_line время нельзя (инвалидация кэша каждый ход), а без него агент
+        # не знает время суток и путает «сегодня/вчера» при данных за days=1.
+        _time_line = (
+            f"⏰ Сейчас у пользователя {_now_local.strftime('%H:%M')} ({_tz_name}). "
+            "Это ЕДИНСТВЕННЫЙ достоверный источник текущего времени: любые упоминания "
+            "времени/«сейчас» в истории диалога относятся к моменту тех сообщений и УСТАРЕЛИ.\n"
+        )
+        tracker_block = _time_line + _recent_tracker_events(db, user_id)
         # Prompt caching: system prompt + tool definitions cached at $0.30/MT
         # instead of $3.00/MT on subsequent calls (Sonnet 4.6). Cache TTL 5 min
         # default, refreshed by every cache hit. Within a single conversation
@@ -2226,7 +2820,10 @@ def ask_agent(
         # `cache_control: ephemeral` on the LAST tool entry caches everything
         # before it (system + all tools). See:
         # https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching
-        cached_tools = [dict(t) for t in TOOLS]
+        # #269: триаж-тулы инбокса — только админам; остальные их не видят.
+        _admin_only = {"list_feedback", "triage_feedback"}
+        _tool_defs = TOOLS if _is_admin(user_id) else [t for t in TOOLS if t["name"] not in _admin_only]
+        cached_tools = [dict(t) for t in _tool_defs]
         cached_tools[-1]["cache_control"] = {"type": "ephemeral"}
         # Prompt caching давно GA — beta-хедер prompt-caching-2024-07-31 не нужен
         request_headers = dict(headers)
@@ -2258,6 +2855,10 @@ def ask_agent(
             import time as _time
 
             def _post_with_overload_retry(p):
+                # #347: закрываем транзакцию ДО сети. Внутри этого хелпера БД
+                # не трогаем, поэтому одного вызова хватает на все три post'а
+                # (основной + retry + fallback).
+                _end_open_tx(db)
                 # Strategy: fast fallback. Anthropic 529 обычно сигнализирует
                 # пиковую нагрузку на конкретный compute pool — короткий retry
                 # её не разгребает. Лучше быстро прыгнуть на 4.5 (другой pool).
@@ -2324,8 +2925,9 @@ def ask_agent(
             blocks = response.get("content", [])
 
             if stop_reason == "tool_use":
-                # Record assistant turn (text + tool_use blocks)
-                _save_message(db, user_id, "assistant", blocks, source=src)
+                # Record assistant turn (text + tool_use blocks) в память сразу,
+                # в БД — ниже, одной транзакцией вместе с tool_result (#347):
+                # осиротевший tool_use в истории ломает следующий ход.
                 history.append({"role": "assistant", "content": blocks})
 
                 # Прогресс по tools этого turn'a. Если в одном turn модель
@@ -2335,7 +2937,9 @@ def ask_agent(
                 # это самая «зрелищная» операция.
                 if progress_cb:
                     tool_names = [b["name"] for b in blocks if b.get("type") == "tool_use"]
-                    render_tools = [n for n in tool_names if n in ("render_chart", "render_report")]
+                    render_tools = [
+                        n for n in tool_names if n in ("render_chart", "render_report", "generate_doctor_report")
+                    ]
                     pick = render_tools[0] if render_tools else (tool_names[0] if tool_names else None)
                     if pick:
                         label = _TOOL_PROGRESS_LABEL.get(pick, "📡 запрос данных")
@@ -2375,14 +2979,15 @@ def ask_agent(
                 except Exception:
                     logger.exception("P-003 stale-history invalidation failed (non-fatal)")
 
-                _save_message(db, user_id, "tool_result", tool_results, source=src)
+                # tool_use + tool_result — одной транзакцией (см. _persist_turns).
+                _persist_turns(db, user_id, [("assistant", blocks), ("tool_result", tool_results)], src)
                 history.append({"role": "user", "content": tool_results})
-                db.commit()
                 continue  # next iteration — model will incorporate tool results
 
-            # stop_reason in ("end_turn", "max_tokens", "stop_sequence") — final
-            _save_message(db, user_id, "assistant", blocks, source=src)
-            db.commit()
+            # stop_reason in ("end_turn", "max_tokens", "stop_sequence") — final.
+            # #347: ответ уже сгенерирован и оплачен — сбой записи в историю
+            # его не отменяет, отдаём пользователю в любом случае.
+            _persist_turns(db, user_id, [("assistant", blocks)], src)
 
             # Extract text
             text_parts = [b["text"] for b in blocks if b.get("type") == "text"]

@@ -15,6 +15,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.filters import StateFilter
 
 from services.state import state_manager
+from services.state_helpers import build_meal_state_data
 
 router = Router()
 
@@ -61,6 +62,31 @@ _NUMERIC_DOSE_RE = re.compile(
     r"\d+\s*(?:г|мг|мл|кг|/|ме|iu|шт|капсул|таблеток)",
     re.IGNORECASE,
 )
+
+# #198: «короткий ответ-значение» — ответ на вопрос агента вроде «54», «72.5 кг»,
+# «5000 ме», «120/80». Всё сообщение целиком (anchored) — одно значение:
+#   • bare число ограничено 3 цифрами (вес), чтобы не ловить годы («2024»);
+#   • число С единицей — до 5 цифр (доза «5000 МЕ»);
+#   • АД «XXX/YY» (+опц. пульс).
+_SHORT_VALUE_RE = re.compile(
+    r"^\s*(?:"
+    r"\d{1,3}(?:[.,]\d{1,2})?"  # bare число (вес)
+    r"|\d{1,5}(?:[.,]\d{1,2})?\s*(?:кг|kg|г|g|мг|mg|мл|ml|ме|iu|шт|таб\.?|капс\.?)"  # число + единица
+    r"|\d{2,3}\s*[/\\]\s*\d{2,3}(?:\s*[/\\]?\s*\d{2,3})?"  # АД
+    r")\s*$",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_short_value(text: str) -> bool:
+    """#198: True если ВСЁ сообщение — одно короткое значение (вес/доза/АД),
+    похожее на ответ на вопрос агента. Вопросы и длинный текст исключаются."""
+    t = (text or "").strip()
+    if not t or len(t) > 15 or "?" in t:
+        return False
+    return bool(_SHORT_VALUE_RE.match(t))
+
+
 # Addendum intent: "забыл добавить/упомянуть", "нужно добавить/дописать".
 # Must route to BotkinClaw agent (returns True) so the agent can call
 # get_recent_meals, find the last slot, and log the addendum with that slot.
@@ -442,6 +468,20 @@ def extract_date_from_text(text: str, user_tz=None) -> tuple[str, str]:
             except ValueError:
                 pass
 
+    # 4. Эвристика «вечером → вчера» (F-004, прецедент 20.06.2026: «Я вечером
+    # ещё 500 мл кефира выпила», отправлено в 07:43 утра — запись ушла на
+    # сегодня, юзер «потерял» её в дашборде). Если в тексте маркер вечернего
+    # приёма, СЕЙЧАС у юзера утро (до 12:00) и явного «сегодня» нет — человек
+    # описывает вчерашний вечер.
+    evening_markers = ("вечером", "на ночь", "перед сном", "за ужином")
+    if (
+        datetime.now(_tz).hour < 12
+        and any(re.search(rf"\b{m}\b", text_lower) for m in evening_markers)
+        and not re.search(r"\bсегодня\b", text_lower)
+    ):
+        date_str = (datetime.now(_tz) - timedelta(days=1)).strftime("%Y-%m-%d")
+        return date_str, text
+
     return None, text
 
 
@@ -569,6 +609,18 @@ async def handle_text_message(message: Message, user_id: int, state: FSMContext)
     # /my_products feature removed — no early-exit product matching, LLM handles all.
     router_result = None
 
+    # ── #198: короткий ответ после вопроса агента → агенту, не парсеру ───────
+    # «сколько весишь?» → «54» перехватывался бы weight/BP-парсером, и агент не
+    # получал ответ — диалог рвался. Если предыдущий ход агента был свежим (<10
+    # мин) вопросом («?»), маршрутизируем короткое значение в BotkinClaw, минуя
+    # парсеры. Проверка истории — только для коротких значений (дёшево, редко).
+    if _looks_like_short_value(text):
+        from core.agent_chat import agent_last_turn_was_question
+
+        if agent_last_turn_was_question(int(user_id)):
+            debug_logger.info(f"🔀 #198 reroute: короткий ответ {text[:20]!r} после вопроса агента → BotkinClaw")
+            router_result = {"type": "other", "data": {}}
+
     # ── BP regex pre-check ──────────────────────────────────────────────────
     # Детерминированный паттерн «XXX/YY пульс ZZ» — мимо LLM-роутера.
     # Прецедент 25.05.2026: папа Александра написал «Сейчас 15:07 151/92 пуль 65»,
@@ -624,7 +676,8 @@ async def handle_text_message(message: Message, user_id: int, state: FSMContext)
         bp_match = None
     else:
         bp_match = _BP_RE.search(text)
-    if bp_match:
+    # router_result уже задан (#198 reroute) → не перехватываем АД, отдаём агенту.
+    if bp_match and router_result is None:
         sys_v = int(bp_match.group(1))
         dia_v = int(bp_match.group(2))
         pulse_v = int(bp_match.group(3)) if bp_match.group(3) else None
@@ -1143,14 +1196,15 @@ async def handle_text_message(message: Message, user_id: int, state: FSMContext)
             new_state = UserState(
                 user_id=user_id,
                 state="waiting_confirmation",
-                data={
-                    "description": text,
-                    "meal_items": meal_items,
-                    "meal_totals": meal_totals,
-                    "meal_time": _temporal_phrase_to_time(text) or datetime.now(user_tz).strftime("%H:%M"),
-                    "meal_name": meal_name,
-                    "date": custom_date,
-                },
+                data=build_meal_state_data(
+                    source="text",
+                    description=text,
+                    meal_items=meal_items,
+                    meal_totals=meal_totals,
+                    meal_time=_temporal_phrase_to_time(text) or datetime.now(user_tz).strftime("%H:%M"),
+                    meal_name=meal_name,
+                    date=custom_date,
+                ),
             )
             state_manager.set_state(user_id, new_state)
 
@@ -1354,14 +1408,17 @@ async def handle_text_message(message: Message, user_id: int, state: FSMContext)
             new_state = UserState(
                 user_id=user_id,
                 state="waiting_confirmation",
-                data={
-                    "description": text,
-                    "meal_items": meal_items,
-                    "meal_totals": meal_totals,
-                    "meal_time": _temporal_phrase_to_time(text) or datetime.now(user_tz).strftime("%H:%M"),
-                    "meal_name": meal_name,
-                    "date": custom_date,
-                },
+                data=build_meal_state_data(
+                    source="text",
+                    description=text,
+                    meal_items=meal_items,
+                    meal_totals=meal_totals,
+                    meal_time=_temporal_phrase_to_time(text) or datetime.now(user_tz).strftime("%H:%M"),
+                    meal_name=meal_name,
+                    date=custom_date,
+                    # #255: пользователь дал точные КБЖУ с этикетки текстом
+                    product_label=data.get("product_label"),
+                ),
             )
             state_manager.set_state(user_id, new_state)
 
@@ -1437,12 +1494,15 @@ async def handle_text_message(message: Message, user_id: int, state: FSMContext)
                 if not sub_items:
                     skipped.append(meal_name)
                     continue
+                # build_meal_state_data() валидирует каждый под-приём отдельно
+                # (extra="forbid") — та же защита от опечаток, что и в
+                # одиночном meal-флоу (#256).
                 multi_meals.append(
-                    {
-                        "meal_name": meal_name,
-                        "meal_items": sub_items,
-                        "meal_totals": sub_totals,
-                    }
+                    build_meal_state_data(
+                        meal_name=meal_name,
+                        meal_items=sub_items,
+                        meal_totals=sub_totals,
+                    )
                 )
 
             if not multi_meals:
@@ -1454,11 +1514,12 @@ async def handle_text_message(message: Message, user_id: int, state: FSMContext)
             new_state = UserState(
                 user_id=user_id,
                 state="waiting_confirmation",
-                data={
-                    "description": text,
-                    "multi_meals": multi_meals,
-                    "date": custom_date,
-                },
+                data=build_meal_state_data(
+                    source="text",
+                    description=text,
+                    multi_meals=multi_meals,
+                    date=custom_date,
+                ),
             )
             state_manager.set_state(user_id, new_state)
 

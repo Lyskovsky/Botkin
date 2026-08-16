@@ -10,10 +10,11 @@ This module provides database operations for all tables:
 - BloodTests: create, get latest, get all
 """
 
+import secrets
 from datetime import datetime, date, time, timedelta, timezone
 from typing import Optional, List, Dict, Any
 from sqlalchemy.orm import Session
-from sqlalchemy import desc, text
+from sqlalchemy import desc, func, text
 import logging
 
 from database.models import (
@@ -25,6 +26,9 @@ from database.models import (
     BloodTest,
     BodyMeasurement,
     UserSettings,
+    PersonalAccessToken,
+    VerifiedProduct,
+    UserFeedback,
 )
 
 logger = logging.getLogger(__name__)
@@ -81,6 +85,57 @@ def update_user_calorie_settings(
     db.commit()
     db.refresh(user)
     return user
+
+
+def merge_onboarding_lists(db: Session, telegram_id: int, additions: dict[str, list]) -> dict[str, int]:
+    """Дописать аллергии/диагнозы в users.onboarding_data с дедупом.
+
+    additions: {"allergies": [...], "chronic_conditions": [...]}.
+    Пишет в тот ключ-синоним, что уже читается отчётом (первый непустой),
+    иначе — в дефолтный ('allergies'/'chronic_conditions'). Дедуп case-insensitive.
+    Возвращает {"allergies": n_added, "chronic_conditions": m_added}.
+    """
+    from core.health.onboarding_lists import ALLERGY_KEYS, CONDITION_KEYS, split_freetext
+
+    user = get_user_by_telegram_id(db, telegram_id)
+    if not user:
+        return {}
+
+    data = dict(user.onboarding_data or {})
+    key_order = {"allergies": ALLERGY_KEYS, "chronic_conditions": CONDITION_KEYS}
+    added: dict[str, int] = {}
+
+    for kind, keys in key_order.items():
+        new_items = additions.get(kind) or []
+        target = kind
+        for k in keys:
+            if data.get(k):
+                target = k
+                break
+        existing = data.get(target)
+        if isinstance(existing, list):
+            merged = [str(v).strip() for v in existing if str(v).strip()]
+        elif isinstance(existing, str):
+            merged = split_freetext(existing)
+        else:
+            merged = []
+        seen = {s.strip().lower() for s in merged}
+        n_added = 0
+        for item in new_items:
+            s = str(item).strip()
+            if not s or s.lower() in seen:
+                continue
+            merged.append(s)
+            seen.add(s.lower())
+            n_added += 1
+        if n_added:
+            data[target] = merged
+        added[kind] = n_added
+
+    user.onboarding_data = data  # реассайн объекта → SQLAlchemy засекает JSONB-изменение
+    db.commit()
+    db.refresh(user)
+    return added
 
 
 def generate_health_token(db: Session, telegram_id: int) -> str:
@@ -162,6 +217,95 @@ def reset_health_token(db: Session, telegram_id: int) -> str:
     return user.health_token
 
 
+# ==================== PERSONAL ACCESS TOKEN (PAT) OPERATIONS ====================
+# Долгоживущие токены для MCP-коннектора Claude Desktop (#228). Пользователь сам
+# выпускает их в боте, коннектор меняет на короткоживущий JWT через /api/agent/exchange_pat_for_jwt.
+
+ALLOWED_PAT_SCOPES = ("ro", "rw")
+
+
+def create_pat(
+    db: Session,
+    telegram_id: int,
+    name: Optional[str] = None,
+    scope: str = "rw",
+    created_by: Optional[int] = None,
+) -> PersonalAccessToken:
+    """Выпустить новый PAT для пользователя.
+
+    Формат токена зеркалит Apple Health: ``pat_<telegram_id>_<hex32>``.
+    scope: 'rw' — личный токен (чтение+запись), 'ro' — для шаринга врачу (только чтение).
+    created_by — кто выпустил (telegram_id); по умолчанию сам владелец (self-service).
+    """
+    if scope not in ALLOWED_PAT_SCOPES:
+        raise ValueError(f"Invalid PAT scope {scope!r}, expected one of {ALLOWED_PAT_SCOPES}")
+
+    user = get_user_by_telegram_id(db, telegram_id)
+    if not user:
+        raise ValueError(f"User {telegram_id} not found")
+
+    pat = PersonalAccessToken(
+        user_id=telegram_id,
+        token=f"pat_{telegram_id}_{secrets.token_hex(32)}",
+        name=name,
+        scope=scope,
+        created_by_user=created_by if created_by is not None else telegram_id,
+    )
+    db.add(pat)
+    db.commit()
+    db.refresh(pat)
+    return pat
+
+
+def get_active_pat_by_token(db: Session, token: str) -> Optional[PersonalAccessToken]:
+    """Найти активный (не отозванный) PAT по строке токена и отметить факт использования.
+
+    Используется публичным exchange-эндпоинтом ДО установки app.user_id — поэтому
+    таблица без RLS (см. миграцию pat0token01). Возвращает None для отозванных/несуществующих.
+    """
+    if not token:
+        return None
+    pat = (
+        db.query(PersonalAccessToken)
+        .filter(PersonalAccessToken.token == token, PersonalAccessToken.revoked_at.is_(None))
+        .first()
+    )
+    if pat:
+        pat.last_used_at = datetime.now(timezone.utc)
+        db.commit()
+        db.refresh(pat)
+    return pat
+
+
+def list_pats(db: Session, telegram_id: int, include_revoked: bool = False) -> List[PersonalAccessToken]:
+    """Список PAT пользователя (по умолчанию только активные), новые сверху."""
+    query = db.query(PersonalAccessToken).filter(PersonalAccessToken.user_id == telegram_id)
+    if not include_revoked:
+        query = query.filter(PersonalAccessToken.revoked_at.is_(None))
+    return query.order_by(desc(PersonalAccessToken.created_at)).all()
+
+
+def revoke_pat(db: Session, telegram_id: int, token_id: int) -> bool:
+    """Отозвать PAT (soft-delete через revoked_at). Скоупится по владельцу.
+
+    Возвращает True если токен найден и отозван, False если не найден/чужой/уже отозван.
+    """
+    pat = (
+        db.query(PersonalAccessToken)
+        .filter(
+            PersonalAccessToken.id == token_id,
+            PersonalAccessToken.user_id == telegram_id,
+            PersonalAccessToken.revoked_at.is_(None),
+        )
+        .first()
+    )
+    if not pat:
+        return False
+    pat.revoked_at = datetime.now(timezone.utc)
+    db.commit()
+    return True
+
+
 # ==================== NUTRITION LOG OPERATIONS ====================
 
 
@@ -209,6 +353,23 @@ def get_nutrition_logs_by_period(db: Session, user_id: int, start_date: date, en
         .order_by(NutritionLog.date, NutritionLog.meal_time)
         .all()
     )
+
+
+def get_daily_calories_by_period(db: Session, user_id: int, start_date: date, end_date: date) -> Dict[date, float]:
+    """Суммарные калории по дням за период — агрегация на стороне SQL.
+
+    Для adaptive TDEE (окно 42 дня, вызывается на каждый сейв еды): тянуть все
+    строки nutrition_log и суммировать в Python дорого, GROUP BY по дате
+    возвращает максимум window_days строк. Дни без записей в результате
+    отсутствуют (это дырки логирования, не нули).
+    """
+    rows = (
+        db.query(NutritionLog.date, func.sum(NutritionLog.totals["calories"].as_float()))
+        .filter(NutritionLog.user_id == user_id, NutritionLog.date >= start_date, NutritionLog.date <= end_date)
+        .group_by(NutritionLog.date)
+        .all()
+    )
+    return {d: float(total or 0) for d, total in rows}
 
 
 def get_activity_logs_by_period(db: Session, user_id: int, start_date: date, end_date: date) -> List[ActivityLog]:
@@ -356,6 +517,83 @@ def upsert_manual_weight(
         bone_mass=bone_mass,
         source=source,
     )
+
+
+def upsert_device_weight(
+    db: Session,
+    user_id: int,
+    measured_at: datetime,
+    weight: float,
+    body_fat: Optional[float] = None,
+    muscle_mass: Optional[float] = None,
+    water: Optional[float] = None,
+    bmi: Optional[float] = None,
+    visceral_fat: Optional[int] = None,
+    bone_mass: Optional[float] = None,
+    source: str = "agent_api",
+) -> bool:
+    """Идемпотентно записать замер с весов по ключу (user_id, measured_at).
+
+    Возвращает True если строка создана, False если обновлена. Не коммитит —
+    вызывающий решает границу транзакции (батч истории = одна транзакция).
+
+    Device-семантика (#170): ключ — точный таймстамп замера, без дедупа по
+    календарному дню. Дедуп по дню нужен только ручному вводу, где measured_at
+    это `now()` с микросекундами (см. upsert_manual_weight).
+
+    COALESCE-семантика на обновлении: None в поле НЕ затирает уже известное
+    значение. Каналы приносят разные наборы полей — HAE отдаёт вес/жир/безжировую
+    массу, весы Withings — полный состав (мышцы/вода/кости/висцеральный жир,
+    которых нет в HealthKit). Апсерт одного канала не должен обнулять другой.
+
+    Select-then-write, а не диалектный ON CONFLICT: один код на Postgres (прод) и
+    SQLite (тесты) — тот же приём, что в upsert_blood_test. Unique-констрейнт
+    weights_user_id_measured_at_key остаётся страховкой на уровне БД.
+    """
+    existing = (
+        db.query(Weight)
+        .filter(
+            Weight.user_id == user_id,
+            Weight.measured_at == measured_at,
+        )
+        .first()
+    )
+
+    if existing is None:
+        db.add(
+            Weight(
+                user_id=user_id,
+                measured_at=measured_at,
+                weight=weight,
+                body_fat=body_fat,
+                muscle_mass=muscle_mass,
+                water=water,
+                bmi=bmi,
+                visceral_fat=visceral_fat,
+                bone_mass=bone_mass,
+                source=source,
+            )
+        )
+        # Flush обязателен: прод-сессия создаётся с autoflush=False
+        # (database/__init__.py), поэтому без него только что добавленная строка не
+        # видна SELECT'у выше на следующей итерации батча. Два замера с одинаковым
+        # measured_at в одном запросе роняли бы commit по UNIQUE-констрейнту.
+        db.flush()
+        return True
+
+    existing.weight = weight
+    for field, value in (
+        ("body_fat", body_fat),
+        ("muscle_mass", muscle_mass),
+        ("water", water),
+        ("bmi", bmi),
+        ("visceral_fat", visceral_fat),
+        ("bone_mass", bone_mass),
+    ):
+        if value is not None:
+            setattr(existing, field, value)
+    existing.source = source
+    return False
 
 
 def get_latest_weight(db: Session, user_id: int) -> Optional[Weight]:
@@ -685,6 +923,54 @@ def get_all_blood_tests(db: Session, user_id: int) -> List[BloodTest]:
     return db.query(BloodTest).filter(BloodTest.user_id == user_id).order_by(desc(BloodTest.test_date)).all()
 
 
+def upsert_blood_test(db: Session, row: dict) -> bool:
+    """Идемпотентно записать анализ по ключу (user_id, test_date, test_type).
+
+    Возвращает True если строка создана, False если обновлена. Select-then-write,
+    а не диалектный ON CONFLICT: один и тот же код работает и на Postgres (прод),
+    и на SQLite (тесты). Уникальный индекс blood_tests_user_date_type_unique
+    остаётся страховкой на уровне БД.
+
+    Используется /doc (см. core/health/doc_to_blood_test.build_blood_test_row).
+    Скрипт scripts/import/kb_to_blood_tests.py ходит своим путём — он исполняется
+    на маке и пишет через ssh+psql, без ORM-сессии.
+    """
+    test_date = row["test_date"]
+    if isinstance(test_date, str):
+        test_date = date.fromisoformat(test_date)
+
+    existing = (
+        db.query(BloodTest)
+        .filter(
+            BloodTest.user_id == row["user_id"],
+            BloodTest.test_date == test_date,
+            BloodTest.test_type == row["test_type"],
+        )
+        .first()
+    )
+    status = row.get("status") or "current"
+
+    if existing is not None:
+        existing.values = row["values"]
+        existing.file_path = row.get("file_path")
+        existing.status = status
+        db.commit()
+        return False
+
+    db.add(
+        BloodTest(
+            user_id=row["user_id"],
+            test_date=test_date,
+            test_type=row["test_type"],
+            values=row["values"],
+            file_path=row.get("file_path"),
+            status=status,
+        )
+    )
+    db.commit()
+    return True
+
+
 def get_last_activity_date(db: Session, user_id: int) -> Optional[date]:
     """Get the most recent date with activity data"""
     result = db.query(ActivityLog.date).filter(ActivityLog.user_id == user_id).order_by(ActivityLog.date.desc()).first()
@@ -916,6 +1202,117 @@ def get_recent_product_names(db: Session, user_id: int, limit: int = 15, lookbac
     return list(by_name.values())
 
 
+# ==================== VERIFIED PRODUCTS (#255) ====================
+
+
+def get_verified_products(db: Session, user_id: int, limit: Optional[int] = None) -> List[VerifiedProduct]:
+    """Записи справочника, видимые пользователю: личные + общие (user_id IS NULL).
+
+    Личные идут первыми (приоритет при матчинге), внутри группы — по times_used DESC.
+    """
+    q = (
+        db.query(VerifiedProduct)
+        .filter((VerifiedProduct.user_id == user_id) | (VerifiedProduct.user_id.is_(None)))
+        # nullslast нельзя: sqlite до 3.30 не умеет NULLS LAST — сортируем выражением
+        .order_by(VerifiedProduct.user_id.is_(None), desc(VerifiedProduct.times_used))
+    )
+    if limit:
+        q = q.limit(limit)
+    return q.all()
+
+
+def find_verified_product(db: Session, user_id: int, name_norm: str) -> Optional[VerifiedProduct]:
+    """Точный поиск по нормализованному имени. Личная запись приоритетнее общей."""
+    return (
+        db.query(VerifiedProduct)
+        .filter(
+            VerifiedProduct.name_norm == name_norm,
+            (VerifiedProduct.user_id == user_id) | (VerifiedProduct.user_id.is_(None)),
+        )
+        .order_by(VerifiedProduct.user_id.is_(None))
+        .first()
+    )
+
+
+def upsert_verified_product(
+    db: Session,
+    user_id: Optional[int],
+    name: str,
+    name_norm: str,
+    calories_per_100g: float,
+    protein_per_100g: float,
+    fats_per_100g: float,
+    carbs_per_100g: float,
+    source: str,
+    fiber_per_100g: Optional[float] = None,
+    portion_g: Optional[float] = None,
+    brand: Optional[str] = None,
+    aliases: Optional[list] = None,
+    barcode: Optional[str] = None,
+) -> VerifiedProduct:
+    """Создаёт или обновляет запись справочника в скоупе (user_id, name_norm).
+
+    user_id=None — общая запись (сид/оператор). Повторное «Запомнить продукт»
+    с новыми цифрами обновляет существующую запись, не плодя дубли.
+    """
+    existing = (
+        db.query(VerifiedProduct)
+        .filter(
+            VerifiedProduct.name_norm == name_norm,
+            VerifiedProduct.user_id == user_id if user_id is not None else VerifiedProduct.user_id.is_(None),
+        )
+        .first()
+    )
+    if existing:
+        existing.name = name
+        existing.calories_per_100g = calories_per_100g
+        existing.protein_per_100g = protein_per_100g
+        existing.fats_per_100g = fats_per_100g
+        existing.carbs_per_100g = carbs_per_100g
+        existing.source = source
+        if fiber_per_100g is not None:
+            existing.fiber_per_100g = fiber_per_100g
+        if portion_g is not None:
+            existing.portion_g = portion_g
+        if brand is not None:
+            existing.brand = brand
+        if aliases is not None:
+            existing.aliases = aliases
+        if barcode is not None:
+            existing.barcode = barcode
+        db.commit()
+        db.refresh(existing)
+        return existing
+
+    product = VerifiedProduct(
+        user_id=user_id,
+        name=name,
+        name_norm=name_norm,
+        brand=brand,
+        aliases=aliases,
+        barcode=barcode,
+        calories_per_100g=calories_per_100g,
+        protein_per_100g=protein_per_100g,
+        fats_per_100g=fats_per_100g,
+        carbs_per_100g=carbs_per_100g,
+        fiber_per_100g=fiber_per_100g,
+        portion_g=portion_g,
+        source=source,
+    )
+    db.add(product)
+    db.commit()
+    db.refresh(product)
+    return product
+
+
+def increment_verified_product_usage(db: Session, product_id: int) -> None:
+    """times_used += 1 — для ранжирования топ-N в промпт-блоке."""
+    db.query(VerifiedProduct).filter(VerifiedProduct.id == product_id).update(
+        {VerifiedProduct.times_used: VerifiedProduct.times_used + 1}
+    )
+    db.commit()
+
+
 # ==================== RLS HELPERS ====================
 
 
@@ -932,3 +1329,123 @@ def set_user_session_var(db: Session, user_id: int) -> None:
     """
     # SET LOCAL only accepts string literals, not parameterized values — str() cast required
     db.execute(text("SET LOCAL app.user_id = :uid"), {"uid": str(user_id)})
+
+
+# ==================== FEEDBACK INBOX (#188) ====================
+
+
+def create_feedback(
+    db: Session,
+    *,
+    user_id: int,
+    text: str,
+    source: str,
+    kind: str = "unspecified",
+    agent_context: Optional[dict] = None,
+) -> UserFeedback:
+    """Записать обратную связь в единый инбокс user_feedback (#188).
+
+    source: 'command' | 'agent' | 'webapp'. kind: 'bug'|'feature'|'question'|'unspecified'.
+    Вызывающий код ДОЛЖЕН предварительно проверить is_feedback_opted_out().
+    """
+    row = UserFeedback(
+        user_id=user_id,
+        text=text,
+        source=source,
+        kind=kind,
+        agent_context=agent_context,
+        status="new",
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def list_recent_feedback(db: Session, *, status: Optional[str] = "new", limit: int = 20) -> List[UserFeedback]:
+    """Последние записи фидбека, новые сверху. status=None → все статусы (#269 триаж)."""
+    q = db.query(UserFeedback)
+    if status is not None:
+        q = q.filter(UserFeedback.status == status)
+    return q.order_by(UserFeedback.created_at.desc(), UserFeedback.id.desc()).limit(limit).all()
+
+
+def is_feedback_opted_out(db: Session, user_id: int) -> bool:
+    """True, если пользователь отписался от захвата фидбека. Нет строки настроек → False."""
+    settings = db.query(UserSettings).filter(UserSettings.user_id == user_id).one_or_none()
+    return bool(settings and settings.feedback_opt_out)
+
+
+# ── Триаж инбокса фидбека (#269) ────────────────────────────────────────────
+FEEDBACK_STATUSES = ("new", "triaged", "in_progress", "done", "wontfix", "duplicate")
+FEEDBACK_PRIORITIES = ("P0", "P1", "P2", "P3")
+_FEEDBACK_RESOLVED_STATUSES = ("done", "wontfix")
+
+
+def get_feedback(db: Session, feedback_id: int) -> Optional[UserFeedback]:
+    """Одна запись фидбека по id (или None)."""
+    return db.query(UserFeedback).filter(UserFeedback.id == feedback_id).one_or_none()
+
+
+def update_feedback_status(db: Session, feedback_id: int, status: str) -> Optional[UserFeedback]:
+    """Сменить статус записи (#269). `resolved_at` ставится при done/wontfix и
+    сбрасывается при возврате в открытый статус. Невалидный статус → ValueError;
+    записи нет → None."""
+    if status not in FEEDBACK_STATUSES:
+        raise ValueError(f"invalid status {status!r}; allowed: {', '.join(FEEDBACK_STATUSES)}")
+    row = get_feedback(db, feedback_id)
+    if row is None:
+        return None
+    row.status = status
+    if status in _FEEDBACK_RESOLVED_STATUSES:
+        row.resolved_at = row.resolved_at or datetime.now(timezone.utc)
+    else:
+        row.resolved_at = None
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def set_feedback_priority(db: Session, feedback_id: int, priority: Optional[str]) -> Optional[UserFeedback]:
+    """Приоритет P0-P3 (или None — снять) (#269). Невалидный → ValueError; нет записи → None."""
+    if priority is not None and priority not in FEEDBACK_PRIORITIES:
+        raise ValueError(f"invalid priority {priority!r}; allowed: {', '.join(FEEDBACK_PRIORITIES)} or None")
+    row = get_feedback(db, feedback_id)
+    if row is None:
+        return None
+    row.priority = priority
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def set_feedback_github(db: Session, feedback_id: int, github_issue: Optional[str]) -> Optional[UserFeedback]:
+    """Привязать GitHub-issue (#269). Нормализуем ведущий '#' ('#123'→'123');
+    пусто/None — снять привязку. Нет записи → None."""
+    normalized = github_issue.strip().lstrip("#") if github_issue else None
+    normalized = normalized or None
+    if normalized is not None and len(normalized) > 64:
+        raise ValueError(f"github_issue too long ({len(normalized)} > 64); передавай номер, не URL")
+    row = get_feedback(db, feedback_id)
+    if row is None:
+        return None
+    row.github_issue = normalized
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def mark_feedback_notified(db: Session, feedback_id: int) -> Optional[UserFeedback]:
+    """Штамп `notified_at=now()` — guard идемпотентности уведомления автора (Фаза 3, #188).
+
+    Ставит время только если оно ещё не выставлено: повторный вызов НЕ перезаписывает
+    исходный штамп (значит, второй `done` не «сдвинет» дату и не спровоцирует повторную
+    отправку). Нет записи → None."""
+    row = get_feedback(db, feedback_id)
+    if row is None:
+        return None
+    if row.notified_at is None:
+        row.notified_at = datetime.now(timezone.utc)
+        db.commit()
+        db.refresh(row)
+    return row

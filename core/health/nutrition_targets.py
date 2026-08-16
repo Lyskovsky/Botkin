@@ -33,10 +33,16 @@ def calculate_targets(
     stats: Optional[Dict] = None,
     user: Any = None,
     today_tdee: Optional[float] = None,
+    today_tdee_final: bool = False,
+    adaptive_tdee: Optional[float] = None,
 ) -> Dict:
     """
     Рассчитывает целевые калории и макросы.
-    Источники TDEE: user.bmr+user.avg_active > stats/avg_tdee > fallback.
+    Источники TDEE: adaptive_tdee > user.bmr+user.avg_active > stats/avg_tdee > fallback.
+
+    adaptive_tdee: maintenance, выведенный из собственных данных питания и веса
+        (core/health/adaptive_tdee.py, метод MacroFactor). Приоритетнее девайсов
+        и ручных настроек: закрывает энергобаланс по факту, а не по оценке.
 
     today_tdee: фактический расход (BMR+активные) за конкретный день из Garmin.
         Если он выше базового (среднего/ручного) — берётся он. Это «пол по среднему»:
@@ -44,6 +50,12 @@ def calculate_targets(
         день (today_tdee мал) max() сохраняет стабильную цель по среднему.
         Так одна формула закрывает обе стороны бага: и заниженную цель в день
         тренировки, и скачущую вниз цель из-за неполных Garmin-дней (фикс 04.04.2026).
+
+    today_tdee_final: True для завершённого дня с полным синком (фикс 02.07.2026):
+        факт дня — истина, берётся вместо среднего даже если он НИЖЕ (иначе в
+        ленивые дни цель по среднему разрешала переедать). Вызывающий обязан сам
+        проверить полноту данных дня (get_day_energy_fact) — сюда битый tdee
+        передавать нельзя.
     """
     settings = get_user_settings()
     weight = settings["weight_kg"]
@@ -59,8 +71,13 @@ def calculate_targets(
 
     estimated_tdee = 0.0
 
+    # 0. Адаптивный TDEE из питания+веса — самый честный источник.
+    # Диапазон уже гарантирован санити-границами compute_adaptive_tdee.
+    if adaptive_tdee is not None:
+        estimated_tdee = float(adaptive_tdee)
+        logger.info(f"[targets] TDEE адаптивный (питание+вес): {estimated_tdee:.0f}")
     # 1. Ручные настройки пользователя (BMR + активные)
-    if user and getattr(user, "bmr", None) and user.bmr and user.bmr > 500:
+    elif user and getattr(user, "bmr", None) and user.bmr and user.bmr > 500:
         bmr_val = float(user.bmr)
         active_val = (
             float(user.avg_active_calories or 0)
@@ -86,7 +103,11 @@ def calculate_targets(
     # Today-boost: реальный сегодняшний расход важнее среднего, если выше.
     # Берём max — никогда не занижаем цель в день тренировки, но и не роняем её
     # в неполный/ленивый день (там today_tdee мал → выигрывает базовый TDEE).
-    if today_tdee and today_tdee > estimated_tdee:
+    # Для завершённого дня (today_tdee_final) факт — истина в обе стороны.
+    if today_tdee and today_tdee_final:
+        logger.info(f"[targets] день завершён: TDEE {estimated_tdee:.0f} → {today_tdee:.0f} (факт дня)")
+        estimated_tdee = float(today_tdee)
+    elif today_tdee and today_tdee > estimated_tdee:
         logger.info(f"[targets] today-boost: {estimated_tdee:.0f} → {today_tdee:.0f} (факт за день > среднего)")
         estimated_tdee = float(today_tdee)
 

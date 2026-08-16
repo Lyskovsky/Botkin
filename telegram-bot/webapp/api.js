@@ -83,6 +83,23 @@
       return request('/api/dashboard_url');
     },
 
+    // POST /api/feedback  {text, kind} → {status: "ok"|"opted_out", id?}  (#271)
+    sendFeedback({ text, kind = 'unspecified' }) {
+      return request('/api/feedback', {
+        method: 'POST',
+        body: JSON.stringify({ text, kind }),
+      });
+    },
+
+    // POST /api/doctor_report → {status: "sent"} (#290). PDF-отчёт уходит в чат.
+    // language — 'ru'|'en' (#300); бэкенд валидирует и резолвит по language_code при отсутствии.
+    requestDoctorReport(language) {
+      return request('/api/doctor_report', {
+        method: 'POST',
+        body: JSON.stringify({ language }),
+      });
+    },
+
     // Escape hatch for ad-hoc calls (e.g. /api/settings).
     request,
   };

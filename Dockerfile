@@ -3,9 +3,12 @@ FROM python:3.11-slim
 WORKDIR /app
 
 # Установка системных зависимостей
+# libpango/libgdk-pixbuf/libcairo + fontconfig + DejaVu (кириллица) — рантайм weasyprint (#290).
 RUN apt-get update && apt-get install -y \
     gcc \
     postgresql-client \
+    libpango-1.0-0 libpangocairo-1.0-0 libgdk-pixbuf-2.0-0 libcairo2 \
+    libffi8 fontconfig shared-mime-info fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/*
 
 # Копирование requirements и установка зависимостей

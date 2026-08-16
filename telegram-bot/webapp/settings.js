@@ -301,6 +301,7 @@ function addSupplement() {
 // ── BMR section ─────────────────────────────────────────────────────────────
 const PAL = { sedentary: 1.2, light: 1.375, moderate: 1.55, high: 1.725 };
 const SOURCE_LABEL = {
+  adaptive: 'цель по вашим данным (питание + вес) · БМР с часов',
   garmin: 'из Garmin · обновляется ежедневно по часам',
   apple_health: 'из Apple Health · обновляется ежедневно с часов / телефона',
   manual: 'формула Mifflin-St Jeor по твоим параметрам',
@@ -345,6 +346,10 @@ function populateBmrForm() {
   const av = bmrState.available;
   const r = bmrState.resolved;
   const lines = [];
+  if (r.source === 'adaptive') {
+    const tdee = r.tdee ? ` · ${r.tdee} ккал` : '';
+    lines.push(`<div><strong>Адаптивная оценка</strong> (питание + вес) — ✓ используется${tdee}</div>`);
+  }
   if (av.garmin) {
     const tag = (r.source === 'garmin') ? '✓ используется' : 'доступно';
     lines.push(`<div><strong>Garmin</strong> — ${tag}${r.source === 'garmin' && r.bmr ? ` · ${r.bmr} ккал` : ''}</div>`);
@@ -659,9 +664,30 @@ async function loadDataSources() {
     if (!res.ok) throw new Error(res.status);
     const { sources } = await res.json();
     group.innerHTML = sources.map(s => _renderSourceRow(s)).join('');
+    _bindDataSourceActions(group);
   } catch(e) {
     group.innerHTML = '<div class="settings-row disabled"><div class="row-label"><div class="row-sub">Не удалось загрузить</div></div></div>';
   }
+}
+
+// Делегированный обработчик кнопок в панелях источников (Apple Health / Health Connect).
+// Кнопки несут data-* вместо inline-onclick с данными — значение токена не может
+// «разорвать» кавычки атрибута (баг a94ab56: JSON.stringify в двойных кавычках
+// onclick="..." закрывал атрибут → кнопки «Health Auto Export»/«iOS Shortcuts» и
+// «Скопировать» падали с синтаксической ошибкой и не реагировали). Слушатель вешается
+// один раз на контейнер и переживает пере-рендеры innerHTML.
+function _bindDataSourceActions(group) {
+  if (!group || group.dataset.actionsBound) return;
+  group.dataset.actionsBound = '1';
+  group.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-action]');
+    if (!btn || !group.contains(btn)) return;
+    if (btn.dataset.action === 'apple-method') {
+      selectAppleMethod(btn.dataset.method, btn.dataset.token, btn.dataset.source);
+    } else if (btn.dataset.action === 'copy') {
+      copyToken(btn.dataset.copy, btn);
+    }
+  });
 }
 
 function _renderSourceRow(s) {
@@ -717,8 +743,8 @@ function _renderAppleHealthPanel(token, sourceId) {
   return `<div class="connect-content">
     <p>Выбери способ подключения:</p>
     <div class="connect-method-btns">
-      <button class="method-btn" onclick="selectAppleMethod('hae', ${JSON.stringify(token)}, '${safeSourceId}')">💰 Health Auto Export</button>
-      <button class="method-btn" onclick="selectAppleMethod('shortcut', ${JSON.stringify(token)}, '${safeSourceId}')">🆓 iOS Shortcuts</button>
+      <button class="method-btn" data-action="apple-method" data-method="hae" data-token="${safeToken}" data-source="${safeSourceId}">💰 Health Auto Export</button>
+      <button class="method-btn" data-action="apple-method" data-method="shortcut" data-token="${safeToken}" data-source="${safeSourceId}">🆓 iOS Shortcuts</button>
     </div>
     <div id="apple-detail-${safeSourceId}"></div>
   </div>`;
@@ -731,7 +757,7 @@ function _renderHealthConnectPanel(token) {
     <ol>
       <li>Установи APK: <a href="https://github.com/mcnaveen/health-connect-webhook/releases/latest" target="_blank">health-connect-webhook (GitHub Releases)</a></li>
       <li>В приложении укажи URL:<br><code>https://botkin.health/android_health_v1</code></li>
-      <li>Твой ключ: <code>${safeToken}</code><button class="copy-btn" onclick="copyToken(${JSON.stringify(token)}, this)">Скопировать</button></li>
+      <li>Твой ключ: <code>${safeToken}</code><button class="copy-btn" data-action="copy" data-copy="${safeToken}">Скопировать</button></li>
       <li>Выдай разрешения Health Connect и нажми Sync.</li>
     </ol>
   </div>`;
@@ -746,20 +772,21 @@ function selectAppleMethod(method, token, sourceId) {
       <li>Установи <strong>Health Auto Export</strong> (App Store, $24.99 разово)</li>
       <li>Add Automation → REST API:<br>
         URL: <code>https://botkin.health/apple_health_v2</code><br>
-        Header: <code>Authorization: Bearer ${safeToken}</code><button class="copy-btn" onclick="copyToken(${JSON.stringify('Bearer ' + token)}, this)">Скопировать</button></li>
+        Header: <code>Authorization: Bearer ${safeToken}</code><button class="copy-btn" data-action="copy" data-copy="Bearer ${safeToken}">Скопировать</button></li>
       <li>Format: JSON · v2 · Aggregate ON · Group by Day · Range: Yesterday</li>
       <li>Выбери нужные метрики и сохрани.</li>
     </ol>
     <p style="color:#8e8e93;font-size:12px">Данные начнут поступать ночью (или через ручной экспорт в HAE).</p>`;
   } else {
     detail.innerHTML = `<ol>
-      <li>Установи шаблон: <a href="https://www.icloud.com/shortcuts/61542a7b1edb42ad86b0b99137c00a94" target="_blank">Botkin Health Export (iCloud)</a></li>
+      <li>Выбери версию команды:<br>
+        📱 <a href="https://www.icloud.com/shortcuts/e3884d8261954664bde8bd78de0ccfdb" target="_blank">Только iPhone</a> — шаги, дистанция, калории, этажи<br>
+        ⌚️ <a href="https://www.icloud.com/shortcuts/890c9df1ae614a4eaf5e8cd49416154a" target="_blank">iPhone + Apple Watch</a> — + пульс, HRV, SpO₂, дыхание, походка</li>
       <li>В поле «Текст» вставь ключ целиком:<br>
-        <code>Bearer ${safeToken}</code><button class="copy-btn" onclick="copyToken(${JSON.stringify('Bearer ' + token)}, this)">Скопировать</button></li>
-      <li>Настройки → Команды → Дополнения → включи «Разрешить публикацию большого количества данных»</li>
-      <li>Автоматизация → + → Приложение → Telegram → «Открывается» → запустить команду → «Выполнять немедленно»</li>
+        <code>Bearer ${safeToken}</code><button class="copy-btn" data-action="copy" data-copy="Bearer ${safeToken}">Скопировать</button></li>
+      <li>Установка, разрешения и автоматизация — в <a href="https://github.com/botkin-health/Botkin/blob/main/docs/user_guide/ru/apple-health.md#-%D0%B1%D0%B5%D1%81%D0%BF%D0%BB%D0%B0%D1%82%D0%BD%D1%8B%D0%B9-%D0%BF%D1%83%D1%82%D1%8C--ios-shortcuts-%D0%B1%D0%B5%D0%B7-hae" target="_blank">гайде</a></li>
     </ol>
-    <p style="color:#8e8e93;font-size:12px">⚠️ Shortcut шлёт только метрики Apple Watch за сегодня. Вес, давление и сон — только через HAE.</p>`;
+    <p style="color:#8e8e93;font-size:12px">Вес, давление и сон — только через HAE.</p>`;
   }
 }
 
@@ -787,6 +814,43 @@ function _fmtDate(iso) {
   if (!iso) return '';
   const d = new Date(iso);
   return d.toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' });
+}
+
+// ── Feedback (сообщить об ошибке / идею) — #271 ──────────────────────────────
+async function sendFeedback() {
+  const textEl = document.getElementById('fb-text');
+  const statusEl = document.getElementById('fb-status');
+  const btn = document.getElementById('fb-send-btn');
+  const text = (textEl.value || '').trim();
+  if (!text) {
+    statusEl.textContent = 'Напишите сообщение';
+    statusEl.className = 'fb-status error';
+    return;
+  }
+  const kind = document.querySelector('input[name="fb-kind"]:checked')?.value || 'unspecified';
+  const orig = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Отправка…';
+  statusEl.textContent = '';
+  statusEl.className = 'fb-status';
+  try {
+    const res = await window.API.sendFeedback({ text, kind });
+    if (res && res.status === 'opted_out') {
+      statusEl.textContent = 'Вы отключили отправку обратной связи в настройках.';
+      statusEl.className = 'fb-status error';
+    } else {
+      statusEl.textContent = '✓ Спасибо! Отправлено разработчикам.';
+      statusEl.className = 'fb-status ok';
+      textEl.value = '';
+    }
+  } catch (e) {
+    console.error('sendFeedback failed', e);
+    statusEl.textContent = '⚠ Не удалось отправить. Попробуйте позже.';
+    statusEl.className = 'fb-status error';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = orig;
+  }
 }
 
 // ── Init ─────────────────────────────────────────────────────────────────────

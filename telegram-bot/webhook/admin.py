@@ -19,12 +19,14 @@ import os
 import secrets
 import shutil
 import subprocess
+import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
+from urllib.parse import parse_qs
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from sqlalchemy import text
 
@@ -58,22 +60,42 @@ def _expected_cookie_token() -> Optional[str]:
     return hmac.new(b"botkin-admin-cookie-v1", pw.encode(), hashlib.sha256).hexdigest()
 
 
-def _check_auth(creds: Optional[HTTPBasicCredentials], request: Optional[Request] = None) -> None:
-    expected_user = os.getenv("ADMIN_USERNAME", "admin")
+def _password_ok(password: str) -> bool:
+    """Сверка пароля с ADMIN_PASSWORD (constant-time)."""
     expected_pass = os.getenv("ADMIN_PASSWORD", "")
     if not expected_pass:
-        # Safety: if ADMIN_PASSWORD env not set, refuse all admin access
-        raise HTTPException(status_code=503, detail="Admin not configured")
+        return False
+    return secrets.compare_digest(password.encode(), expected_pass.encode())
+
+
+def _is_authed(creds: Optional[HTTPBasicCredentials], request: Optional[Request] = None) -> bool:
+    """True, если запрос авторизован: валидной remember-me cookie ИЛИ Basic Auth.
+
+    Basic-ветка — сознательный fallback для curl/скриптов/второго админа (#226):
+    форма логина заменяет только браузерный вход, не программный.
+    """
+    if not os.getenv("ADMIN_PASSWORD", ""):
+        return False
     # 1) Валидная «remember-me» кука → пускаем без Basic Auth
     expected_token = _expected_cookie_token()
     cookie_token = request.cookies.get(ADMIN_COOKIE_NAME) if request else None
     if cookie_token and expected_token and secrets.compare_digest(cookie_token, expected_token):
-        return
+        return True
     # 2) Иначе — обычный Basic Auth
-    if not creds or not (
-        secrets.compare_digest(creds.username.encode(), expected_user.encode())
-        and secrets.compare_digest(creds.password.encode(), expected_pass.encode())
-    ):
+    expected_user = os.getenv("ADMIN_USERNAME", "admin")
+    return bool(
+        creds
+        and secrets.compare_digest(creds.username.encode(), expected_user.encode())
+        and _password_ok(creds.password)
+    )
+
+
+def _check_auth(creds: Optional[HTTPBasicCredentials], request: Optional[Request] = None) -> None:
+    """Гард для API-роутов: 401+Basic-challenge при отсутствии авторизации."""
+    if not os.getenv("ADMIN_PASSWORD", ""):
+        # Safety: if ADMIN_PASSWORD env not set, refuse all admin access
+        raise HTTPException(status_code=503, detail="Admin not configured")
+    if not _is_authed(creds, request):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Auth required",
@@ -84,6 +106,47 @@ def _check_auth(creds: Optional[HTTPBasicCredentials], request: Optional[Request
 def admin_auth(request: Request, creds: Optional[HTTPBasicCredentials] = Depends(security)) -> str:
     _check_auth(creds, request)
     return creds.username if creds else "admin"
+
+
+# ─── Login form: троттлинг + сессионная cookie ──────────────────────────────
+
+# Защита от брутфорса формы логина: после LOGIN_MAX_ATTEMPTS неудачных попыток
+# с одного IP вход залочен на LOGIN_LOCKOUT_SECONDS. Стор in-memory (per-process)
+# — для одного админ-инстанса достаточно; не размазываем по БД (KISS).
+LOGIN_MAX_ATTEMPTS = 5
+LOGIN_LOCKOUT_SECONDS = 300
+_login_attempts: dict[str, list[float]] = {}
+
+
+def _client_ip(request: Request) -> str:
+    return request.client.host if request.client else "unknown"
+
+
+def _is_locked(ip: str) -> bool:
+    """Сколько свежих неудачных попыток у IP — и не превышен ли лимит."""
+    now = time.monotonic()
+    recent = [t for t in _login_attempts.get(ip, []) if now - t < LOGIN_LOCKOUT_SECONDS]
+    _login_attempts[ip] = recent
+    return len(recent) >= LOGIN_MAX_ATTEMPTS
+
+
+def _record_failed_login(ip: str) -> None:
+    _login_attempts.setdefault(ip, []).append(time.monotonic())
+
+
+def _set_admin_cookie(resp) -> None:
+    """Ставит/продлевает подписанную remember-me cookie (httpOnly+Secure, /admin)."""
+    token = _expected_cookie_token()
+    if token:
+        resp.set_cookie(
+            ADMIN_COOKIE_NAME,
+            token,
+            max_age=ADMIN_COOKIE_DAYS * 24 * 3600,
+            httponly=True,
+            secure=True,
+            samesite="lax",
+            path="/admin",
+        )
 
 
 # ─── HTML page ─────────────────────────────────────────────────────────────
@@ -158,6 +221,7 @@ input.editable:focus{border-color:var(--b);outline:none;background:var(--bg2)}
   <h1>Botkin Admin <span class="sub mono" id="now"></span></h1>
   <div class="tools">
     <button onclick="loadAll()">↻ Обновить</button>
+    <a href="/admin/logout"><button type="button">Выйти</button></a>
   </div>
 </header>
 
@@ -448,22 +512,90 @@ setInterval(loadAll, 60000);  // refresh every minute
 """
 
 
-@router.get("/", response_class=HTMLResponse)
-async def admin_index(_: str = Depends(admin_auth)) -> HTMLResponse:
-    resp = HTMLResponse(content=ADMIN_HTML)
-    # «Запомнить меня»: после успешного входа ставим/продлеваем куку, чтобы
-    # с этого браузера не переспрашивать Basic Auth (см. _check_auth).
-    token = _expected_cookie_token()
-    if token:
-        resp.set_cookie(
-            ADMIN_COOKIE_NAME,
-            token,
-            max_age=ADMIN_COOKIE_DAYS * 24 * 3600,
-            httponly=True,
-            secure=True,
-            samesite="lax",
-            path="/admin",
+LOGIN_HTML = r"""<!doctype html>
+<html lang="ru"><head>
+<meta charset="utf-8"><title>Botkin · Вход</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+:root{--bg:#0a0e17;--card:#141a28;--bd:#1f2940;--fg:#e8eef7;--mu:#7a879f;--g:#00ff9d;--r:#ff3b6d}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--fg);font:14px/1.5 -apple-system,BlinkMacSystemFont,'SF Pro Text','Inter',sans-serif;
+ min-height:100vh;display:flex;align-items:center;justify-content:center;
+ background-image:radial-gradient(circle at 20% 0%,rgba(0,255,157,.05) 0%,transparent 50%),radial-gradient(circle at 80% 100%,rgba(168,85,247,.05) 0%,transparent 50%)}
+.box{background:var(--card);border:1px solid var(--bd);border-radius:16px;padding:32px;width:min(360px,92vw)}
+h1{font-size:20px;margin-bottom:4px}
+.sub{color:var(--mu);font-size:13px;margin-bottom:20px}
+label{display:block;color:var(--mu);font-size:12px;margin-bottom:6px}
+input{width:100%;background:#0a0e17;border:1px solid var(--bd);border-radius:10px;color:var(--fg);
+ padding:12px 14px;font-size:15px;outline:none}
+input:focus{border-color:var(--g)}
+button{width:100%;margin-top:16px;background:var(--g);color:#04130c;border:0;border-radius:10px;
+ padding:12px;font-size:15px;font-weight:600;cursor:pointer}
+.err{background:rgba(255,59,109,.12);border:1px solid rgba(255,59,109,.4);color:var(--r);
+ border-radius:10px;padding:10px 12px;font-size:13px;margin-bottom:16px}
+</style></head><body>
+<form class="box" method="post" action="/admin/login">
+  <h1>Botkin Admin</h1>
+  <div class="sub">Вход в панель администратора</div>
+  __ERROR__
+  <label for="pw">Пароль</label>
+  <input id="pw" name="password" type="password" autofocus autocomplete="current-password">
+  <button type="submit">Войти</button>
+</form>
+</body></html>
+"""
+
+
+def _login_page(error: str = "") -> str:
+    block = f'<div class="err">{error}</div>' if error else ""
+    return LOGIN_HTML.replace("__ERROR__", block)
+
+
+@router.get("/login", response_class=HTMLResponse)
+async def admin_login_page(request: Request, creds: Optional[HTTPBasicCredentials] = Depends(security)):
+    # Уже авторизован (cookie/Basic) → на главную, форму не показываем.
+    if _is_authed(creds, request):
+        return RedirectResponse("/admin/", status_code=303)
+    return HTMLResponse(content=_login_page())
+
+
+@router.post("/login")
+async def admin_login_submit(request: Request):
+    ip = _client_ip(request)
+    if _is_locked(ip):
+        return HTMLResponse(
+            content=_login_page("Слишком много попыток. Подождите несколько минут."),
+            status_code=429,
         )
+    # Парсим urlencoded-тело вручную (а не через FastAPI Form) — чтобы не тянуть
+    # зависимость python-multipart ради одного поля пароля.
+    body = (await request.body()).decode("utf-8", errors="ignore")
+    password = parse_qs(body).get("password", [""])[0]
+    if not _password_ok(password):
+        _record_failed_login(ip)
+        return HTMLResponse(content=_login_page("Неверный пароль."), status_code=401)
+    # Успех → чистим счётчик, ставим сессию, ведём на главную.
+    _login_attempts.pop(ip, None)
+    resp = RedirectResponse("/admin/", status_code=303)
+    _set_admin_cookie(resp)
+    return resp
+
+
+@router.get("/logout")
+async def admin_logout():
+    resp = RedirectResponse("/admin/login", status_code=303)
+    resp.delete_cookie(ADMIN_COOKIE_NAME, path="/admin")
+    return resp
+
+
+@router.get("/", response_class=HTMLResponse)
+async def admin_index(request: Request, creds: Optional[HTTPBasicCredentials] = Depends(security)):
+    # Браузерный вход: нет сессии → форма логина (не нативный Basic-popup).
+    if not _is_authed(creds, request):
+        return RedirectResponse("/admin/login", status_code=303)
+    resp = HTMLResponse(content=ADMIN_HTML)
+    # «Запомнить меня»: продлеваем куку при каждом успешном заходе.
+    _set_admin_cookie(resp)
     return resp
 
 
@@ -770,6 +902,77 @@ async def api_llm_usage(days: int = 7, _: str = Depends(admin_auth)) -> JSONResp
                     }
                     for r in by_user
                 ],
+            }
+        )
+    finally:
+        db.close()
+
+
+_FUNNEL_STAGES = [
+    "onboarding_started",
+    "persona_selected",
+    "quiz_completed",
+    "goal_computed",
+    "first_food_logged",
+    "first_agent_question",
+]
+
+
+def _funnel_counts(db, days: int, track: Optional[str] = None) -> dict:
+    """Уникальные пользователи на каждой стадии воронки за последние `days` дней."""
+    where_track = "AND track = :track" if track else ""
+    params = {"since": datetime.now(timezone.utc) - timedelta(days=days)}
+    if track:
+        params["track"] = track
+    rows = db.execute(
+        text(
+            f"""
+            SELECT event, COUNT(DISTINCT user_id) AS n
+            FROM funnel_events
+            WHERE ts >= :since {where_track}
+            GROUP BY event
+            """
+        ),
+        params,
+    ).fetchall()
+    by_event = {r[0]: r[1] for r in rows}
+    return {stage: int(by_event.get(stage, 0)) for stage in _FUNNEL_STAGES}
+
+
+@router.get("/api/funnel")
+async def api_funnel(days: int = 30, track: Optional[str] = None, _: str = Depends(admin_auth)) -> JSONResponse:
+    """Воронка онбординга/активации: counts по стадиям + конверсии + активация.
+
+    Активация (MVP на событиях): пользователи, у кого есть И first_food_logged,
+    И first_agent_question. Порог «3 лога за 3 дня» — отдельный запрос команды
+    по nutrition_log (не здесь); тут — событийный прокси."""
+    db = SessionLocal()
+    try:
+        counts = _funnel_counts(db, days=days, track=track)
+        started = counts["onboarding_started"] or 1
+        conversions = {stage: round(100 * counts[stage] / started, 1) for stage in _FUNNEL_STAGES}
+        activated = db.execute(
+            text(
+                """
+                SELECT COUNT(*) FROM (
+                  SELECT user_id
+                  FROM funnel_events
+                  WHERE event IN ('first_food_logged','first_agent_question')
+                    AND ts >= :since
+                  GROUP BY user_id
+                  HAVING COUNT(DISTINCT event) = 2
+                ) t
+                """
+            ),
+            {"since": datetime.now(timezone.utc) - timedelta(days=days)},
+        ).scalar()
+        return JSONResponse(
+            {
+                "days": days,
+                "track": track,
+                "counts": counts,
+                "conversion_pct_from_start": conversions,
+                "activated_users": int(activated or 0),
             }
         )
     finally:

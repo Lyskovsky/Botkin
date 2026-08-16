@@ -12,6 +12,8 @@
 а не из value (оно зависит от локали аккаунта).
 
 Креды: LLU_EMAIL / LLU_PASSWORD в .env. Регион — EU (аккаунт Netherlands).
+Доп. региональные followers (напр. RU-пациенты, которых EU-follower не видит): env
+LLU_FOLLOWERS (JSON-список {region,email,password}) — см. collect_rows_all().
 API неофициальный (pylibrelinkup) — может меняться; см. docs/researches/2026-06-14-cgm-librelinkup-integration.md.
 
 Использование:
@@ -157,16 +159,37 @@ def _ensure_user_agent() -> None:
         Trend._missing_patched = True  # type: ignore[attr-defined]
 
 
-def _new_client():
-    """Сконструировать PyLibreLinkUp (регион EU) без авторизации. Креды из env."""
-    email = os.getenv("LLU_EMAIL")
-    password = os.getenv("LLU_PASSWORD")
+def _resolve_api_url(region: str | None):
+    """Регион ('EU'/'RU'/'US'/...) → api_url для PyLibreLinkUp.
+
+    pylibrelinkup покрывает основные регионы enum'ом APIUrl — в т.ч. RU (= https://api.libreview.ru,
+    подтверждено на живых кредах 19.07.2026). Для регионов ВНЕ enum — фолбэк на региональный host
+    `api-<region>.libreview.io` (тот же URL-паттерн, что у APIUrl). PyLibreLinkUp при логине не на
+    своём регионе сам следует redirect'у из тела ответа (`data.redirect`).
+    """
+    from pylibrelinkup import APIUrl
+
+    key = (region or "EU").strip().upper()
+    if hasattr(APIUrl, key):
+        return getattr(APIUrl, key)
+    return f"https://api-{key.lower()}.libreview.io"
+
+
+def _new_client(follower: dict | None = None):
+    """Сконструировать PyLibreLinkUp без авторизации.
+
+    follower=None → primary-аккаунт (LLU_EMAIL/LLU_PASSWORD, регион EU) — прежнее поведение.
+    follower={"email","password","region"} → дополнительный региональный follower (LLU_FOLLOWERS).
+    """
+    email = (follower or {}).get("email") or os.getenv("LLU_EMAIL")
+    password = (follower or {}).get("password") or os.getenv("LLU_PASSWORD")
+    region = (follower or {}).get("region") or "EU"
     if not email or not password:
         raise RuntimeError("LLU_EMAIL / LLU_PASSWORD не заданы в .env")
-    from pylibrelinkup import APIUrl, PyLibreLinkUp
+    from pylibrelinkup import PyLibreLinkUp
 
     _ensure_user_agent()
-    return PyLibreLinkUp(email=email, password=password, api_url=APIUrl.EU)
+    return PyLibreLinkUp(email=email, password=password, api_url=_resolve_api_url(region))
 
 
 def _save_token(client) -> None:
@@ -327,6 +350,148 @@ def fetch_patient_ids() -> list[str]:
     return [str(p.patient_id) for p in get_cached_client().get_patients()]
 
 
+# ── Дополнительные региональные followers ─────────────────────────────────────
+# Primary follower (dr@botkin.health, EU) обслуживает EU-пациентов. Приглашение
+# follower'а в LibreLinkUp работает ТОЛЬКО within-region → пациентов из других
+# регионов (RU/US/…) EU-follower не видит, под каждый регион нужен свой follower.
+# Задаются env LLU_FOLLOWERS (JSON-список; primary туда НЕ входит):
+#   LLU_FOLLOWERS='[{"region":"RU","email":"ru-follower@…","password":"…"}]'
+# У каждого extra-follower свой token-cache и свой backoff (ключ = регион), чтобы
+# 476/бан или протухший токен одного региона не влияли на другие.
+
+_extra_clients: dict[str, object] = {}
+_extra_blocked_until: dict[str, float] = {}
+_extra_fail_count: dict[str, int] = {}
+_extra_lock = threading.Lock()
+
+
+def _extra_followers() -> list[dict]:
+    """Доп. followers из env LLU_FOLLOWERS (JSON). [] если не задан/битый.
+
+    Нормализует region в UPPER; пропускает записи без email/password. Битый JSON —
+    не падаем, деградируем к [] (primary продолжит работать сам).
+    """
+    raw = os.getenv("LLU_FOLLOWERS")
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError) as e:
+        logger.warning("LLU_FOLLOWERS не распарсился как JSON (%s) — доп. followers отключены", e)
+        return []
+    out: list[dict] = []
+    for f in data if isinstance(data, list) else []:
+        if isinstance(f, dict) and f.get("email") and f.get("password"):
+            out.append({"region": str(f.get("region") or "EU").upper(), "email": f["email"], "password": f["password"]})
+    return out
+
+
+def _extra_token_cache(region: str) -> Path:
+    """Путь token-cache для региона (свой файл на регион, рядом с primary llu_token.json)."""
+    return ROOT / "data" / "cache" / f"llu_token_{region.lower()}.json"
+
+
+def _extra_client_from_token(follower: dict):
+    """Клиент extra-follower'а с токеном с диска (без логина). None — нет/битый токен."""
+    path = _extra_token_cache(follower["region"])
+    if not path.exists():
+        return None
+    try:
+        d = json.loads(path.read_text())
+        client = _new_client(follower)
+        client._set_token(d["token"])  # noqa: SLF001 — приватный API pylibrelinkup (версия пиннится)
+        client._set_account_id_hash(d["account_id_hash"])  # noqa: SLF001
+        return client
+    except Exception as e:
+        logger.debug("extra[%s]: не восстановил токен: %s", follower["region"], e)
+        return None
+
+
+def _extra_save_token(follower: dict, client) -> None:
+    path = _extra_token_cache(follower["region"])
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"token": client.token, "account_id_hash": client.account_id_hash}))
+        path.chmod(0o600)  # bearer-JWT мед-аккаунта — только владельцу
+    except Exception as e:
+        logger.debug("extra[%s]: не сохранил токен: %s", follower["region"], e)
+
+
+def _get_extra_client(follower: dict, reset: bool = False):
+    """Клиент extra-follower'а: токен с диска → иначе логин с backoff (изолировано по региону).
+
+    Зеркалит get_cached_client для primary, но состояние (клиент/backoff/токен) — своё
+    на каждый регион, поэтому проблемы одного follower'а не трогают остальных.
+    """
+    import time
+
+    region = follower["region"]
+    with _extra_lock:
+        if reset:
+            _extra_clients.pop(region, None)
+            _extra_token_cache(region).unlink(missing_ok=True)
+        client = _extra_clients.get(region)
+        if client is not None:
+            return client
+        from_disk = _extra_client_from_token(follower)
+        if from_disk is not None:
+            _extra_clients[region] = from_disk
+            return from_disk
+        remaining = _extra_blocked_until.get(region, 0.0) - time.monotonic()
+        if remaining > 0:
+            raise LoginOnCooldownError(retry_in=remaining)
+        client = _new_client(follower)
+        try:
+            client.authenticate()
+        except Exception:
+            fc = _extra_fail_count.get(region, 0) + 1
+            _extra_fail_count[region] = fc
+            delay = _LOGIN_BACKOFF_DELAYS[min(fc - 1, len(_LOGIN_BACKOFF_DELAYS) - 1)]
+            _extra_blocked_until[region] = time.monotonic() + delay
+            logger.warning("extra[%s] authenticate() упал (попытка %d) — cooldown %ds", region, fc, delay)
+            raise
+        _extra_fail_count[region] = 0
+        _extra_blocked_until[region] = 0.0
+        _extra_save_token(follower, client)
+        _extra_clients[region] = client
+        return client
+
+
+def collect_rows_all() -> dict[str, list[dict]]:
+    """Точки со ВСЕХ follower'ов: primary (EU) + доп. региональные из LLU_FOLLOWERS.
+
+    Изоляция сбоев: упавший/забаненный follower логируется и пропускается, остальные
+    продолжают. patient_id глобально уникальны, поэтому merge словарей безопасен.
+    """
+    result: dict[str, list[dict]] = {}
+    try:
+        result.update(collect_rows_with_retry())
+    except LoginOnCooldownError as e:
+        logger.warning("primary follower на cooldown (%s) — пропуск", e)
+    except Exception as e:
+        logger.warning("primary follower упал (%s) — пропуск", e)
+
+    for f in _extra_followers():
+        region = f["region"]
+        try:
+            client = _get_extra_client(f)
+        except LoginOnCooldownError as e:
+            logger.warning("follower[%s] на cooldown (%s) — пропуск", region, e)
+            continue
+        except Exception as e:
+            logger.warning("follower[%s] логин упал (%s) — пропуск", region, e)
+            continue
+        try:
+            result.update(collect_rows(client))
+        except Exception as e:
+            logger.warning("follower[%s] pull упал (%s) — сброс токена и повтор", region, e)
+            try:
+                result.update(collect_rows(_get_extra_client(f, reset=True)))
+            except Exception as e2:
+                logger.warning("follower[%s] повтор тоже упал (%s) — пропуск", region, e2)
+    return result
+
+
 def refresh_glucose_for_telegram(telegram_id: int, db_url: str | None = None) -> int:
     """On-demand pull+upsert глюкозы для ОДНОГО пользователя. Возвращает число затронутых точек.
 
@@ -411,8 +576,10 @@ def main():
     args = parser.parse_args()
 
     print("🩸 LibreLinkUp — импорт глюкозы CGM...")
-    # Токен с диска (#135) + ретрай со сбросом, если он протух → 400 на /llu/connections (#162).
-    by_patient = collect_rows_with_retry()
+    # Все followers: primary (EU) + региональные из LLU_FOLLOWERS. Токен с диска (#135) +
+    # ретрай со сбросом при протухшем токене → 400 на /llu/connections (#162); сбой одного
+    # follower'а не валит остальных (collect_rows_all).
+    by_patient = collect_rows_all()
     total = sum(len(v) for v in by_patient.values())
     print(f"   Пациентов: {len(by_patient)}, точек собрано: {total}")
 

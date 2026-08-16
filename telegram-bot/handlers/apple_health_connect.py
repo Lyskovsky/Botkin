@@ -28,8 +28,16 @@ router = Router()
 
 # ── Константы ────────────────────────────────────────────────────────────────
 
-GUIDE_URL = "https://github.com/Lyskovsky/Botkin/blob/main/docs/user_guide/ru/apple-health.md"
-SHORTCUT_ICLOUD_URL = "https://www.icloud.com/shortcuts/61542a7b1edb42ad86b0b99137c00a94"
+GUIDE_URL = "https://github.com/botkin-health/Botkin/blob/main/docs/user_guide/ru/apple-health.md"
+# Якорь на раздел бесплатного пути (для shortcut_setup_text; общий GUIDE_URL остаётся для HAE).
+SHORTCUT_GUIDE_URL = (
+    "https://github.com/botkin-health/Botkin/blob/main/docs/user_guide/ru/apple-health.md"
+    "#-%D0%B1%D0%B5%D1%81%D0%BF%D0%BB%D0%B0%D1%82%D0%BD%D1%8B%D0%B9-%D0%BF%D1%83%D1%82%D1%8C"
+    "--ios-shortcuts-%D0%B1%D0%B5%D0%B7-hae"
+)
+# Две версии бесплатной команды (выбор по набору устройств). Пошаговая установка — в SHORTCUT_GUIDE_URL.
+SHORTCUT_IPHONE_URL = "https://www.icloud.com/shortcuts/e3884d8261954664bde8bd78de0ccfdb"
+SHORTCUT_WATCH_URL = "https://www.icloud.com/shortcuts/890c9df1ae614a4eaf5e8cd49416154a"
 
 HAE_LABEL = "💰 Health Auto Export ($24.99)"
 SHORTCUT_LABEL = "🆓 iOS Shortcuts (бесплатно)"
@@ -93,23 +101,23 @@ def hae_setup_text(token: str) -> str:
 
 
 def shortcut_setup_text(token: str) -> str:
-    """Инструкция бесплатного пути через iOS Shortcuts (с честными ограничениями)."""
+    """Бесплатный путь через iOS Shortcuts — краткое интро + ссылка на полный гайд.
+
+    Пошаговую установку намеренно НЕ дублируем в боте — она в GUIDE_URL (две версии,
+    выдача разрешений, автоматизация). Здесь только ключ + развилка версий.
+    """
     return (
         "🆓 <b>iOS Shortcuts (бесплатно)</b>\n\n"
-        "Бесплатно, через встроенные «Команды» iOS. Данные уходят при каждом открытии Telegram.\n\n"
-        "⚠️ <b>Что шлёт:</b> шаги, дистанция, активные ккал, пульс, пульс покоя, HRV, SpO₂, "
-        "частота дыхания (метрики Apple Watch, за сегодня).\n"
-        "⚠️ <b>Чего НЕ шлёт:</b> вес, давление, сон и фазы сна, историю за прошлые дни. "
-        "Если у тебя весы/тонометр (Withings, Omron) или нужен сон — бери HAE.\n\n"
-        "📲 <b>Настройка:</b>\n"
-        f"1. Установи шаблон: {SHORTCUT_ICLOUD_URL}\n"
-        "2. В поле «Текст» вставь свой ключ целиком (вместе со словом Bearer):\n"
-        f"   <code>Bearer {token}</code>\n"
-        "3. Настройки → Команды → Дополнения → включи «Разрешить публикацию большого количества данных»\n"
-        "4. Команды → Автоматизация → + → Приложение → Telegram → «Открывается» → "
-        "запустить «Botkin Health Export» → «Выполнять немедленно»\n\n"
-        f"📖 Подробный гайд: {GUIDE_URL}\n"
-        "💰 Надёжнее и полнее (вес/давление/сон): /health_token → «Health Auto Export»\n"
+        "Бесплатный синк через встроенные «Команды» iOS, без платных приложений. "
+        "Данные уходят при каждом открытии Telegram.\n\n"
+        "🔑 Твой ключ (понадобится при установке):\n"
+        f"<code>Bearer {token}</code>\n\n"
+        "Две версии на выбор:\n"
+        "📱 <b>Только iPhone</b> — шаги, дистанция, калории, этажи\n"
+        "⌚️ <b>iPhone + Apple Watch</b> — то же + пульс (avg/min/max), пульс покоя, HRV, "
+        "SpO₂, дыхание, походка\n\n"
+        f"📖 <b>Ссылки на команды и пошаговая установка — в гайде:</b>\n{SHORTCUT_GUIDE_URL}\n\n"
+        "💰 Полнее и надёжнее (вес, давление, сон, история): /health_token → «Health Auto Export»\n"
         "♻️ Перевыпустить ключ: /health_token rotate"
     )
 

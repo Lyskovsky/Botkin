@@ -1,0 +1,82 @@
+name: Retro-match verified products
+
+# Ретро-ре-матч КБЖУ исторических записей nutrition_log по справочнику
+# verified_products (#257). Запускается НА сервере:
+# docker exec <бот> python -m scripts.retro_match_verified_products.
+# По умолчанию dry-run (только показать). Прод — только после релиза скрипта в main
+# (иначе модуля нет в прод-образе → упадёт ModuleNotFoundError).
+#
+# ⚠️ workflow_dispatch активен только когда файл на default-ветке (main).
+# После мержа в dev нужен dev→main, иначе кнопки запуска не будет.
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Стенд"
+        type: choice
+        options:
+          - dev
+          - prod
+        default: dev
+      apply:
+        description: "Записать изменения (иначе dry-run)"
+        type: boolean
+        default: false
+      user:
+        description: "Только этот telegram_id (пусто = все)"
+        type: string
+        default: ""
+
+# Не запускать два прогона одного стенда одновременно; текущий не отменять.
+concurrency:
+  group: retro-match-verified-products-${{ inputs.target }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  retro-match:
+    runs-on: ubuntu-latest
+    environment: prod # SSH-секреты там же, где у Sync prod → dev / Cleanup
+    timeout-minutes: 15
+    steps:
+      - name: Setup SSH agent
+        # Пин на commit SHA: action получает SSH-ключ с доступом к серверу —
+        # мутабельный тег можно подменить при компрометации upstream.
+        uses: webfactory/ssh-agent@dc588b651fe13675774614f8e6a936a468676387 # v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Trust host key (pinned)
+        # Пин known_hosts из секрета (не TOFU ssh-keyscan) — защита от MITM.
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "${{ secrets.SSH_KNOWN_HOSTS }}" >> ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Run retro-match on server
+        env:
+          SSH_TARGET: ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}
+          TARGET: ${{ inputs.target }}
+          APPLY: ${{ inputs.apply }}
+          USER_ID: ${{ inputs.user }}
+        run: |
+          if [ "$TARGET" = "prod" ]; then
+            CONTAINER="healthvault_bot"
+          else
+            CONTAINER="botkin_dev_bot"
+          fi
+          FLAGS=""
+          [ "$APPLY" = "true" ] && FLAGS="$FLAGS --apply"
+          # USER_ID из строкового input; берём только если непустой и числовой.
+          if printf '%s' "$USER_ID" | grep -qE '^[0-9]+$'; then
+            FLAGS="$FLAGS --user $USER_ID"
+          fi
+          echo "Стенд=$TARGET · контейнер=$CONTAINER · флаги=${FLAGS:-<нет, dry-run все юзеры>}"
+          # Скрипт уже внутри образа бота (деплой). DATABASE_URL и PYTHONPATH —
+          # из окружения контейнера.
+          ssh -o ConnectTimeout=10 -o ServerAliveInterval=30 -o ServerAliveCountMax=3 \
+            "$SSH_TARGET" docker exec "$CONTAINER" \
+            python -m scripts.retro_match_verified_products $FLAGS

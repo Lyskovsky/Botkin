@@ -62,6 +62,8 @@ async def handle_voice_message(message: Message, bot: Bot, user_id: int):
             user_id=uid_str,
             state="waiting_description",
             data={
+                "source": "voice",
+                "media_path": str(local_path),
                 "photo_paths": [],
                 "photo_file_ids": [],
                 "caption": text_stripped,  # fallback → агент при «other» (#159)

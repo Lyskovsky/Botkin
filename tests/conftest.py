@@ -8,6 +8,8 @@ from unittest.mock import patch
 
 # Add root to path so database module can be imported
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+# Add telegram-bot to path so handlers can be imported in tests
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "telegram-bot"))
 
 # Dummy-ключи ДО импорта модулей, требующих env — pytest можно запускать без
 # ручных export'ов. setdefault не перетирает явно заданные значения.

@@ -196,6 +196,27 @@ def test_tool_loop_calls_tools_api_and_returns_final_answer(agent_db, monkeypatc
     assert roles == ["user", "assistant", "tool_result", "assistant"]
 
 
+def test_supplement_daily_log_tool_dispatch(agent_db, monkeypatch):
+    """get_supplement_daily_log → GET /supplement_daily_log с days + supplement."""
+    fake = FakeRequests(
+        [
+            _anthropic_tool_use("get_supplement_daily_log", {"days": 30, "supplement": "магний"}),
+            _anthropic_text("Магний принимался 12 из 30 дней."),
+        ],
+        tool_payload={"status": "ok", "supplements": [{"supplement": "магний", "days_taken": 12}]},
+    )
+    monkeypatch.setattr(agent_chat, "requests", fake)
+
+    reply = agent_chat.ask_agent(895655, "влияет ли магний на мой сон?")
+
+    assert "12" in reply
+    assert len(fake.tool_calls) == 1
+    call = fake.tool_calls[0]
+    assert call["url"].endswith("/supplement_daily_log")
+    assert call["params"]["days"] == 30
+    assert call["params"]["supplement"] == "магний"
+
+
 def test_api_error_raises_cleanly(agent_db, monkeypatch):
     """(3) 500 от Anthropic → чистый HTTPError наружу (хендлер его ловит),
     без полу-сохранённого ответа ассистента в истории."""
@@ -247,6 +268,29 @@ def test_build_default_agent_prompt_never_empty_without_data():
 
     assert prompt.strip()
     assert "AI-агент" in prompt
+
+
+def test_build_default_prompt_no_history_claim_when_profile_exists():
+    """#340: при непустом медпрофиле промпт НЕ утверждает, что медистории нет —
+    иначе агент верил базовой фразе и советовал как здоровому, игнорируя блок
+    «Медпрофиль» с диагнозами."""
+    u = User(
+        telegram_id=3,
+        first_name="Тест",
+        onboarding_data={"name": "Тест", "chronic_conditions": ["Гипотиреоз (E03.9)"]},
+    )
+
+    prompt = agent_chat.build_default_agent_prompt(u)
+
+    assert "без подробной медицинской истории" not in prompt
+    assert "Медпрофиль" in prompt  # отсылка к блоку, который приклеивается ниже
+
+
+def test_build_default_prompt_keeps_history_claim_without_profile():
+    """Без диагнозов/аллергий фраза про отсутствие медистории остаётся."""
+    u = User(telegram_id=4, first_name="Тест", onboarding_data={"name": "Тест"})
+
+    assert "без подробной медицинской истории" in agent_chat.build_default_agent_prompt(u)
 
 
 def test_user_without_system_prompt_uses_default(agent_db, monkeypatch):
@@ -318,6 +362,62 @@ def test_system_prompt_forces_fresh_meal_tool_call(agent_db, monkeypatch):
     # ядро фикса: прежний вывод мог устареть → не отвечать из памяти
     assert "мог УСТАРЕТЬ" in sys_text
     assert "без НОВОГО вызова тулзы" in sys_text
+
+
+def test_system_prompt_instructs_flag_for_devs(agent_db, monkeypatch):
+    """#188: в system-prompt есть директива флагать баги/пожелания через flag_for_devs."""
+    fake = FakeRequests([_anthropic_text("Передал разработчикам.")])
+    monkeypatch.setattr(agent_chat, "requests", fake)
+
+    agent_chat.ask_agent(895655, "почему ты не умеешь строить графики сна?")
+
+    sys_text = fake.anthropic_calls[0]["payload"]["system"][0]["text"]
+    assert "flag_for_devs" in sys_text
+    assert "не замалчивай" in sys_text
+
+
+def test_system_prompt_gi_honesty(agent_db, monkeypatch):
+    """#232 изъян 1 (универсально): гард — не выдавать высокоГИ-продукты
+    (белый хлеб, сухофрукты, белый рис, сладкое) за «медленные углеводы»."""
+    fake = FakeRequests([_anthropic_text("Смотрю по составу.")])
+    monkeypatch.setattr(agent_chat, "requests", fake)
+
+    agent_chat.ask_agent(895655, "что бы съесть на завтрак?")
+
+    sys_text = fake.anthropic_calls[0]["payload"]["system"][0]["text"]
+    assert "НЕ называй высокогликемические продукты «медленными углеводами»" in sys_text
+    # перечислены конкретные высокоГИ-продукты, которые нельзя выдавать за «медленные»
+    assert "сухофрукты" in sys_text and "белый хлеб" in sys_text
+
+
+def test_system_prompt_gates_low_gi_by_diagnosis(agent_db, monkeypatch):
+    """#232 изъян 1 (адресно): при демпинге/реактивной гипо/постбариатрии —
+    активно предлагать низкоГИ-замены; гейт по constraints/KB, у остальных без изменений."""
+    fake = FakeRequests([_anthropic_text("Гляну ограничения.")])
+    monkeypatch.setattr(agent_chat, "requests", fake)
+
+    agent_chat.ask_agent(895655, "что съесть на перекус?")
+
+    sys_text = fake.anthropic_calls[0]["payload"]["system"][0]["text"]
+    assert "Демпинг / реактивная гипогликемия / постбариатрия — низкоГИ по умолчанию" in sys_text
+    # гейт: явно указано, что без диагноза в constraints/KB совет не меняется
+    assert "у кого таких ограничений в constraints/KB НЕТ" in sys_text
+    assert "цельное зерно вместо белого хлеба" in sys_text
+
+
+def test_system_prompt_doctor_prep_balanced_drugs(agent_db, monkeypatch):
+    """#232 изъян 2: doctor-prep не подаёт один препарат «ключевым»; при демпинге/
+    реактивной гипо (диагноз из KB) — акарбоза как вариант для обсуждения, без назначений."""
+    fake = FakeRequests([_anthropic_text("Готовлю вопросы врачу.")])
+    monkeypatch.setattr(agent_chat, "requests", fake)
+
+    agent_chat.ask_agent(895655, "какие вопросы задать эндокринологу?")
+
+    sys_text = fake.anthropic_calls[0]["payload"]["system"][0]["text"]
+    assert "не подавай один препарат" in sys_text.lower()
+    assert "АКАРБОЗУ" in sys_text
+    # гейт по диагнозу: у кого нет — поведение не меняется
+    assert "У кого такого диагноза в KB нет — поведение не меняется" in sys_text
 
 
 def _insert_router_row(TestSession, user_id, source, text_str):
@@ -414,6 +514,33 @@ def test_edit_meal_tool_registered():
     assert "lunch" in props["new_slot"]["enum"]
 
 
+# ── get_recent_meals days guard (#183) ─────────────────────────────────────────
+
+
+def test_recent_meals_days_guard_in_meta_prompt(agent_db, monkeypatch):
+    """#183: system-prompt содержит guard — НАЧИНАТЬ с days=2, не days=1.
+    Пользователи пишут утром про вчерашнюю еду — days=1 даёт пустой список."""
+    fake = FakeRequests([_anthropic_text("сейчас проверю")])
+    monkeypatch.setattr(agent_chat, "requests", fake)
+
+    agent_chat.ask_agent(895655, "за мой боул ещё числится как перекус")
+
+    sys_text = " ".join(b["text"] for b in fake.anthropic_calls[0]["payload"]["system"])
+    # guard должен запрещать начинать с days=1 при контекстных вопросах
+    assert "days=2" in sys_text
+    assert "days=3" in sys_text  # fallback при пустом ответе
+
+
+def test_addendum_tool_description_uses_days2():
+    """#183: описание инструмента log_meal_text НЕ предписывает days=1 для addendum."""
+    log_meal_tool = next(t for t in agent_chat.TOOLS if t["name"] == "log_meal_text")
+    description = log_meal_tool["description"]
+    # days=1 не должен быть в addendum-инструкции (было до фикса)
+    assert "get_recent_meals(days=1)" not in description
+    # days=2 должен быть — именно столько нужно для захвата вчерашних записей
+    assert "get_recent_meals(days=2)" in description
+
+
 def test_compact_mode_food_key_priority():
     """Compact-режим recent_meals читает ключ 'food' для composite items (прецедент 19.06.2026)."""
     composite_item = {"food": "Боул с киноа, креветками и авокадо", "calories": 511, "protein": 40}
@@ -429,3 +556,129 @@ def test_compact_mode_food_key_priority():
     assert len(names) == 2
     assert "киноа" in names[0]
     assert "Яблоко" in names[1]
+
+
+# ── #347: транзакция не висит поперёк вызова Anthropic ───────────────────────
+
+
+def _session_recording_factory(TestSession, sink):
+    """Фабрика сессий, складывающая созданные сессии в sink (для инспекции в тесте)."""
+
+    def _factory(*args, **kwargs):
+        session = TestSession(*args, **kwargs)
+        sink.append(session)
+        return session
+
+    return _factory
+
+
+def test_no_open_transaction_during_anthropic_call(agent_db, monkeypatch):
+    """(#347) В момент HTTP-вызова Anthropic ни одна сессия ask_agent не должна
+    быть в открытой транзакции.
+
+    Прод-инцидент 26.07.2026: транзакция висела открытой поперёк requests.post
+    (до 60с), а session-level idle_in_transaction_session_timeout=15000 рвал
+    соединение — INSERT ответа падал, готовый ответ пользователю не доходил.
+    """
+    sessions: list = []
+    monkeypatch.setattr(agent_chat, "SessionLocal", _session_recording_factory(agent_db, sessions))
+
+    tx_states: list[list[bool]] = []
+
+    class TxProbeRequests(FakeRequests):
+        def post(self, url, headers=None, json=None, timeout=None, params=None):
+            if url == agent_chat.ANTHROPIC_API_URL:
+                tx_states.append([s.in_transaction() for s in sessions])
+            return super().post(url, headers=headers, json=json, timeout=timeout, params=params)
+
+    fake = TxProbeRequests(
+        [
+            _anthropic_tool_use("get_weight_history", {"days": 7}),
+            _anthropic_text("Вес 82.0 кг, тренд стабильный."),
+        ],
+        tool_payload={"status": "ok", "latest": {"weight_kg": 82.0}},
+    )
+    monkeypatch.setattr(agent_chat, "requests", fake)
+
+    reply = agent_chat.ask_agent(895655, "что с весом за неделю?")
+
+    assert reply
+    assert tx_states, "Anthropic ни разу не вызвался — тест не проверил ничего"
+    for call_no, snapshot in enumerate(tx_states):
+        assert not any(snapshot), f"вызов Anthropic #{call_no}: сессия осталась в открытой транзакции"
+
+
+def test_answer_returned_even_if_history_save_fails(agent_db, monkeypatch):
+    """(#347) Сбой записи в agent_conversations не съедает уже сгенерированный
+    (и оплаченный) ответ — текст всё равно доходит до пользователя.
+    """
+    from sqlalchemy.exc import OperationalError
+
+    real_save = agent_chat._save_message
+
+    def _failing_save(db, user_id, role, content, tool_use_id=None, source="botkinclaw"):
+        if role == "assistant":
+            raise OperationalError("INSERT INTO agent_conversations", {}, Exception("server closed the connection"))
+        return real_save(db, user_id, role, content, tool_use_id=tool_use_id, source=source)
+
+    monkeypatch.setattr(agent_chat, "_save_message", _failing_save)
+
+    fake = FakeRequests([_anthropic_text("ЛФК начинай с изометрии, 2 подхода по 10 секунд.")])
+    monkeypatch.setattr(agent_chat, "requests", fake)
+
+    reply = agent_chat.ask_agent(895655, "как начать ЛФК для шеи?")
+
+    assert "изометри" in reply
+
+
+def test_tool_pair_saved_atomically_and_next_turn_survives(agent_db, monkeypatch):
+    """(#347) Сбой записи в tool-цикле не оставляет в БД осиротевший tool_use.
+
+    Если сохранить assistant(tool_use) и потерять tool_result, следующий вызов
+    поднимет из истории tool_use без пары — Anthropic отвечает на такое 400.
+    Пара пишется одной транзакцией, поэтому в БД либо оба turn'а, либо ни один.
+    """
+    from sqlalchemy.exc import OperationalError
+
+    real_save = agent_chat._save_message
+
+    def _fail_on_tool_result(db, user_id, role, content, tool_use_id=None, source="botkinclaw"):
+        if role == "tool_result":
+            raise OperationalError("INSERT INTO agent_conversations", {}, Exception("server closed the connection"))
+        return real_save(db, user_id, role, content, tool_use_id=tool_use_id, source=source)
+
+    monkeypatch.setattr(agent_chat, "_save_message", _fail_on_tool_result)
+
+    fake = FakeRequests(
+        [
+            _anthropic_tool_use("get_weight_history", {"days": 7}),
+            _anthropic_text("Вес 82.0 кг."),
+        ],
+        tool_payload={"status": "ok", "latest": {"weight_kg": 82.0}},
+    )
+    monkeypatch.setattr(agent_chat, "requests", fake)
+
+    reply = agent_chat.ask_agent(895655, "что с весом?")
+
+    # Ответ пользователю дошёл, несмотря на сбой записи
+    assert "82.0" in reply
+
+    # В БД нет осиротевшего tool_use: раз tool_result не сохранился,
+    # то и парный assistant-turn не должен был сохраниться.
+    roles = [r.role for r in _history_rows(agent_db)]
+    assert roles.count("tool_result") == 0
+    assert roles.count("assistant") == 1, "в истории остался осиротевший tool_use"
+
+    # Следующий ход поднимает историю из БД и не падает
+    monkeypatch.setattr(agent_chat, "_save_message", real_save)
+    fake_next = FakeRequests([_anthropic_text("Тренд стабильный.")])
+    monkeypatch.setattr(agent_chat, "requests", fake_next)
+
+    reply_next = agent_chat.ask_agent(895655, "а тренд?")
+
+    assert "стабильный" in reply_next
+    sent_history = fake_next.anthropic_calls[0]["payload"]["messages"]
+    for msg in sent_history:
+        blocks = msg["content"]
+        if isinstance(blocks, list):
+            assert not any(b.get("type") == "tool_use" for b in blocks), "осиротевший tool_use ушёл в Anthropic"

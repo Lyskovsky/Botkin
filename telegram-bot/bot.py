@@ -138,6 +138,17 @@ def register_handlers(dp: Dispatcher):
         logger.error(f"❌ Ошибка регистрации обработчика apple-health-connect: {e}")
 
     try:
+        from handlers.doc_upload import router as doc_upload_router
+
+        dp.include_router(doc_upload_router)
+        count = len(doc_upload_router.observers) if hasattr(doc_upload_router, "observers") else 0
+        handlers_count += count
+        registered_modules.append("doc_upload")
+    except Exception as e:
+        errors.append(f"Обработчик doc_upload: {e}")
+        logger.error(f"❌ Ошибка регистрации обработчика doc_upload: {e}")
+
+    try:
         from handlers.photo import router as photo_router
 
         dp.include_router(photo_router)
@@ -202,6 +213,61 @@ def register_handlers(dp: Dispatcher):
     except Exception as e:
         errors.append(f"Обработчик /connect_cgm: {e}")
         logger.error(f"❌ Ошибка регистрации обработчика /connect_cgm: {e}")
+
+    try:
+        from handlers.connect_claude import router as connect_claude_router
+
+        dp.include_router(connect_claude_router)
+        count = len(connect_claude_router.observers) if hasattr(connect_claude_router, "observers") else 0
+        handlers_count += count
+        registered_modules.append("/connect_mcp")
+    except Exception as e:
+        errors.append(f"Обработчик /connect_mcp: {e}")
+        logger.error(f"❌ Ошибка регистрации обработчика /connect_mcp: {e}")
+
+    try:
+        from handlers.verified_products import router as verified_products_router
+
+        dp.include_router(verified_products_router)
+        count = len(verified_products_router.observers) if hasattr(verified_products_router, "observers") else 0
+        handlers_count += count
+        registered_modules.append("verified-products")
+    except Exception as e:
+        errors.append(f"Обработчик verified-products: {e}")
+        logger.error(f"❌ Ошибка регистрации обработчика verified-products: {e}")
+
+    try:
+        from handlers.feedback import router as feedback_router
+
+        dp.include_router(feedback_router)
+        count = len(feedback_router.observers) if hasattr(feedback_router, "observers") else 0
+        handlers_count += count
+        registered_modules.append("/feedback")
+    except Exception as e:
+        errors.append(f"Обработчик /feedback: {e}")
+        logger.error(f"❌ Ошибка регистрации обработчика /feedback: {e}")
+
+    try:
+        from handlers.food_audit import router as food_audit_router
+
+        dp.include_router(food_audit_router)
+        count = len(food_audit_router.observers) if hasattr(food_audit_router, "observers") else 0
+        handlers_count += count
+        registered_modules.append("/food_audit")
+    except Exception as e:
+        errors.append(f"Обработчик /food_audit: {e}")
+        logger.error(f"❌ Ошибка регистрации обработчика /food_audit: {e}")
+
+    try:
+        from handlers.persona_cmd import router as persona_router
+
+        dp.include_router(persona_router)
+        count = len(persona_router.observers) if hasattr(persona_router, "observers") else 0
+        handlers_count += count
+        registered_modules.append("/persona")
+    except Exception as e:
+        errors.append(f"Обработчик /persona: {e}")
+        logger.error(f"❌ Ошибка регистрации обработчика /persona: {e}")
 
     # Apple Health handlers removed
     pass
@@ -306,9 +372,12 @@ async def main():
         BotCommand(command="day", description="Итоги дня"),
         BotCommand(command="week", description="Анализ недели"),
         BotCommand(command="vitamins", description="Чек-лист витаминов"),
+        BotCommand(command="doc", description="Загрузить анализ или заключение врача"),
         BotCommand(command="share", description="Поделиться дашбордом здоровья"),
         BotCommand(command="profile", description="Настроить профиль (рост, возраст, цель)"),
+        BotCommand(command="connect_mcp", description="Подключить AI-коннектор (MCP)"),
         BotCommand(command="agent_reset", description="Сбросить недавний контекст AI-ассистента"),
+        BotCommand(command="feedback", description="Сообщить об ошибке / предложить идею"),
         BotCommand(command="help", description="Помощь"),
     ]
 

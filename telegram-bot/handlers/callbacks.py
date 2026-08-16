@@ -3,8 +3,9 @@ from aiogram.filters.callback_data import CallbackData
 
 # Callback data для кнопок подтверждения
 class MealConfirmationCallback(CallbackData, prefix="meal"):
-    action: str  # "save" или "cancel"
+    action: str  # "save", "cancel" или "set_slot" (#181: выбор слота для фото без подписи)
     meal_type: str = "default"  # "menu" или "regular"
+    slot: str = ""  # breakfast/lunch/snack/dinner — только для action="set_slot"
 
 
 class WeightConfirmationCallback(CallbackData, prefix="weight"):

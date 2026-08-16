@@ -21,10 +21,16 @@ import os
 from datetime import datetime, timedelta, timezone
 
 import jwt
-from fastapi import Depends, Header, HTTPException
+from fastapi import Depends, Header, HTTPException, Request
 from sqlalchemy.orm import Session
 
 JWT_TTL_HOURS = int(os.getenv("AGENT_JWT_TTL_HOURS", "1"))
+
+# Допустимые scope для агентских токенов. 'rw' — полный доступ (личный токен
+# владельца, in-process BotkinClaw); 'ro' — только чтение (токен, которым владелец
+# делится с врачом/близким через MCP-коннектор, #228). Legacy-токены без claim
+# трактуются как 'rw' (поведение до #228 не меняется).
+DEFAULT_SCOPE = "rw"
 
 
 def get_db():
@@ -38,14 +44,17 @@ def get_db():
         db.close()
 
 
-def generate_agent_jwt(user_id: int, container_id: str, secret: str) -> str:
-    """Generate a JWT for a NanoClaw container.
+def generate_agent_jwt(user_id: int, container_id: str, secret: str, scope: str = DEFAULT_SCOPE) -> str:
+    """Generate a JWT for an agent (in-process BotkinClaw or MCP-коннектор).
 
-    Called at container startup. Rotated when health_token is regenerated.
+    Called at container startup / при обмене PAT. Rotated when health_token is regenerated.
+    scope: 'rw' (полный) или 'ro' (только чтение, см. #228). По умолчанию 'rw' —
+    обратная совместимость с in-process агентом, который не передаёт scope.
     """
     payload = {
         "user_id": user_id,
         "container_id": container_id,
+        "scope": scope,
         "exp": datetime.now(timezone.utc) + timedelta(hours=JWT_TTL_HOURS),
         "iat": datetime.now(timezone.utc),
     }
@@ -55,6 +64,7 @@ def generate_agent_jwt(user_id: int, container_id: str, secret: str) -> str:
 async def get_agent_user(
     authorization: str = Header(...),
     db: Session = Depends(get_db),
+    request: Request = None,
 ):
     """FastAPI dependency: validate agent JWT, return User row.
 
@@ -62,6 +72,10 @@ async def get_agent_user(
         @router.post("/some/endpoint")
         async def endpoint(user=Depends(get_agent_user)):
             ...
+
+    Кладёт верифицированный scope ('ro'/'rw') в request.state.agent_scope, откуда
+    его читает require_agent_scope. request опционален: прямые вызовы в тестах идут
+    без него (scope тогда не сохраняется, но проверки scope в таких тестах нет).
 
     Raises:
         401: missing/malformed/expired token or user not found
@@ -107,7 +121,40 @@ async def get_agent_user(
     if verified.get("container_id") != agent_id_for(user):
         raise HTTPException(status_code=403, detail="agent_id mismatch")
 
+    # Scope берём ТОЛЬКО из верифицированного payload (не из unverified — иначе
+    # подделка). Legacy-токены без claim → 'rw'. Кладём в request.state для
+    # require_agent_scope.
+    scope = verified.get("scope", DEFAULT_SCOPE)
+    if request is not None:
+        request.state.agent_scope = scope
+
     # Set RLS session variable for any DB queries in this request
     set_user_session_var(db, user.telegram_id)
 
     return user
+
+
+def require_agent_scope(required_scope: str):
+    """Фабрика FastAPI-зависимости: пускает только если у токена нужный scope.
+
+    Навешивается на мутирующие эндпоинты:
+        @router.post("/log_meal_text")
+        async def log_meal_text(req, user=Depends(require_agent_scope("rw"))):
+            ...
+
+    'ro'-токен (которым владелец поделился с врачом) на write-эндпоинте → 403.
+    Сначала отрабатывает get_agent_user (валидация JWT + RLS), затем проверяется
+    scope из request.state. Если scope не выставлен (напр. get_agent_user
+    замокан в тесте) — считаем 'rw', чтобы не ломать существующие тесты.
+    """
+
+    async def _checker(request: Request, user=Depends(get_agent_user)):
+        scope = getattr(request.state, "agent_scope", DEFAULT_SCOPE)
+        if required_scope == "rw" and scope != "rw":
+            raise HTTPException(
+                status_code=403,
+                detail="Токен только для чтения (ro). Изменение данных требует токена с правом записи (rw).",
+            )
+        return user
+
+    return _checker

@@ -309,3 +309,98 @@ class TestBombbar:
         result = calculate_nutrition("батончик bombbar", 20.0)
 
         assert 67 <= result["calories"] <= 78, f"Ожидали ~72 ккал, получили: {result['calories']}"
+
+
+class TestGramsNotPieces:
+    """Регрессия 12.07.2026: '73 г перца' парсилось как 73 ШТУКИ перца × 150г = 10950г.
+
+    Необязательная группа '(?:[а-яё]+\\s+)?' в quantity_patterns съедала единицу
+    измерения 'г', превращая граммы в счётчик штук. Клетчатка считалась от
+    раздутого веса (229.9г при норме 30г/день).
+    """
+
+    def _weight_of(self, products, token):
+        for p in products:
+            if token in p["name"].lower():
+                return p["weight"], p.get("source")
+        return None, None
+
+    def test_grams_of_pepper_is_not_piece_count(self):
+        desc = "обед\n182 г томата\n73 г перца болгарского \nСтоловая ложка оливкового масла \n3 яйца"
+        products = extract_products_from_description(desc)
+        weights = [p["weight"] for p in products if p.get("weight")]
+        assert all(w <= 1000 for w in weights), f"Раздутый вес: {products}"
+        w, _ = self._weight_of(products, "перц")
+        assert w == 73, f"Ожидали 73г перца, получили {w}: {products}"
+
+    def test_pepper_pieces_still_work(self):
+        products = extract_products_from_description("съел 2 перца")
+        w, src = self._weight_of(products, "перец")
+        assert w == 300 and src == "quantity_estimate"
+
+    def test_grams_of_kotleta_is_not_piece_count(self):
+        products = extract_products_from_description("120 г котлеты куриной")
+        w, _ = self._weight_of(products, "котлет")
+        assert w == 120, f"Ожидали 120г котлеты: {products}"
+
+    def test_kotleta_pieces_still_work(self):
+        products = extract_products_from_description("2 котлеты и гарнир")
+        w, src = self._weight_of(products, "котлет")
+        assert w == 160 and src == "quantity_estimate"
+
+    def test_grams_of_syrniki_is_not_piece_count(self):
+        products = extract_products_from_description("100 г сырников со сметаной")
+        w, _ = self._weight_of(products, "сырник")
+        assert w == 100, f"Ожидали 100г сырников: {products}"
+
+
+class TestProductNameNotAcrossNewline:
+    """Регрессия 12.07.2026: группа названия в weight_patterns матчила через \\n.
+
+    '73 г перца болгарского \\nСтоловая ложка масла' давал имя
+    'перца болгарского \\nстоловая' — пробелы в группе названия должны быть
+    горизонтальными ([ \\t]), а не \\s.
+    """
+
+    def test_product_name_stops_at_newline(self):
+        desc = "73 г перца болгарского \nСтоловая ложка оливкового масла"
+        products = extract_products_from_description(desc)
+        pepper = [p for p in products if "перц" in p["name"].lower()]
+        assert pepper, f"Перец не найден: {products}"
+        assert "\n" not in pepper[0]["name"], f"Имя захватило перенос строки: {pepper[0]['name']!r}"
+        assert "столов" not in pepper[0]["name"].lower(), f"Имя захватило следующую строку: {pepper[0]['name']!r}"
+        assert pepper[0]["weight"] == 73
+
+    def test_product_before_weight_stops_at_newline(self):
+        desc = "томат\nперец болгарский 73 г"
+        products = extract_products_from_description(desc)
+        pepper = [p for p in products if "перец" in p["name"].lower()]
+        assert pepper, f"Перец не найден: {products}"
+        assert "\n" not in pepper[0]["name"], f"Имя захватило перенос строки: {pepper[0]['name']!r}"
+        assert "томат" not in pepper[0]["name"].lower(), f"Имя захватило предыдущую строку: {pepper[0]['name']!r}"
+        assert pepper[0]["weight"] == 73
+
+    def test_multiword_name_on_one_line_still_works(self):
+        products = extract_products_from_description("73 г перца болгарского красного")
+        pepper = [p for p in products if "перц" in p["name"].lower()]
+        assert pepper and pepper[0]["name"] == "перца болгарского красного"
+        assert pepper[0]["weight"] == 73
+
+    def test_word_before_newline_number_not_captured_as_weight(self):
+        """Регрессия 12.08.2026: паттерн №2 (продукт-перед-весом) не был закрыт для \\n
+        между именем продукта и числом, только фикс паттерна №1 был сделан 12.07.2026.
+
+        '3 яйца\\n10 грамм легкого сыра' матчило 'яйца' + '10' через перенос строки,
+        яйцо получало чужой вес 10г, и штучное правило (3×55=165г) не могло его
+        перезаписать из-за дедупликации по added_products.
+        """
+        desc = "3 яйца\n10 грамм легкого сыра"
+        products = extract_products_from_description(desc)
+
+        egg_weights = [p["weight"] for p in products if "яйц" in p["name"].lower()]
+        assert egg_weights, f"Яйцо не найдено: {products}"
+        assert all(w != 10.0 for w in egg_weights), f"Яйцо получило вес соседней строки: {products}"
+        assert any(150 <= w <= 180 for w in egg_weights), f"Ожидали ~165г (3×55) для яиц: {products}"
+
+        cheese_weights = [p["weight"] for p in products if "сыр" in p["name"].lower()]
+        assert any(w == 10.0 for w in cheese_weights), f"Сыр должен остаться 10г: {products}"

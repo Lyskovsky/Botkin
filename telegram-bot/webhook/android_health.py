@@ -13,7 +13,7 @@ Source tag: health_connect.
 """
 
 import logging
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import List, Optional
 
 from fastapi import Depends, HTTPException, Request
@@ -129,6 +129,21 @@ def _parse_utc(ts: str) -> Optional[datetime]:
         return None
 
 
+def _merge_intervals_seconds(intervals: list) -> float:
+    """Слить пересекающиеся (start, end) интервалы и вернуть суммарные секунды покрытия."""
+    if not intervals:
+        return 0.0
+    ordered = sorted(intervals, key=lambda pair: pair[0])
+    merged = [ordered[0]]
+    for start, end in ordered[1:]:
+        last_start, last_end = merged[-1]
+        if start <= last_end:
+            merged[-1] = (last_start, max(last_end, end))
+        else:
+            merged.append((start, end))
+    return sum((end - start).total_seconds() for start, end in merged)
+
+
 def _to_local_date(ts: str, user_tz) -> Optional[date]:
     """Конвертировать UTC timestamp → локальную дату в таймзоне пользователя."""
     dt = _parse_utc(ts)
@@ -170,7 +185,7 @@ def _hc_aggregate_by_day(payload: HealthConnectPayload, user_tz) -> dict:
                 "hr_max": None,
                 "rhr_values": [],  # берём последний
                 "hrv_values": [],  # берём последний
-                "sleep_s": 0.0,
+                "sleep_intervals": [],  # (start, end) — мёрджим пересечения перед суммой
                 "weight_records": [],  # берём последний >30 кг
                 "body_fat_pct": None,  # берём последний
                 "blood_pressure": [],  # все замеры отдельно
@@ -214,11 +229,17 @@ def _hc_aggregate_by_day(payload: HealthConnectPayload, user_tz) -> dict:
         if d:
             _slot(d)["hrv_values"].append((rec.time, rec.rmssd_millis))
 
-    # ── sleep: суммируем длительности сессий ─────────────────────────────────
+    # ── sleep: копим интервалы (мёрджим пересечения перед суммой) ────────────
+    # Health Connect отдаёт сессии сырыми (readRecords, без aggregate()) — если
+    # источник пришлёт две пересекающиеся сессии за одну ночь (пере-синк истории),
+    # наивная сумма duration_seconds задвоит часы сна.
     for rec in payload.sleep or []:
         d = _to_local_date(rec.session_end_time, user_tz)
         if d:
-            _slot(d)["sleep_s"] += rec.duration_seconds
+            end_dt = _parse_utc(rec.session_end_time)
+            if end_dt:
+                start_dt = end_dt - timedelta(seconds=rec.duration_seconds)
+                _slot(d)["sleep_intervals"].append((start_dt, end_dt))
 
     # ── weight: копим все записи >30 кг, потом берём последнюю ───────────────
     for rec in payload.weight or []:
@@ -291,6 +312,12 @@ def _hc_aggregate_by_day(payload: HealthConnectPayload, user_tz) -> dict:
         # steps
         if s["steps"] > 0:
             agg["steps"] = s["steps"]
+            if s["steps"] > 40000:
+                # Health Connect отдаёт steps через свой aggregate() (дедуп по origin
+                # встроен в ОС) — если итог всё равно аномален, обычно виноват сам
+                # источник (напр. Mi Fitness пишет и континуальный трекинг, и отдельные
+                # exercise-сессии). Не блокируем запись — только сигнализируем в логах.
+                logger.warning(f"HC_v1 anomalous steps={s['steps']} for {d} — check Health Connect source priority")
 
         # distance_km
         if s["distance_m"] > 0:
@@ -314,9 +341,10 @@ def _hc_aggregate_by_day(payload: HealthConnectPayload, user_tz) -> dict:
             latest_hrv = sorted(s["hrv_values"], key=lambda x: x[0])[-1][1]
             agg["hrv"] = int(round(latest_hrv))
 
-        # sleep_hours
-        if s["sleep_s"] > 0:
-            agg["sleep_hours"] = round(s["sleep_s"] / 3600, 2)
+        # sleep_hours: суммарное покрытие после мёрджа пересекающихся сессий
+        sleep_seconds = _merge_intervals_seconds(s["sleep_intervals"])
+        if sleep_seconds > 0:
+            agg["sleep_hours"] = round(sleep_seconds / 3600, 2)
 
         # weight: последний за день
         if s["weight_records"]:

@@ -109,10 +109,14 @@ Telegram ID и личные данные пользователей — в `~/.c
 
 | Канал на сервере | Кто читает | Формат | Как туда попадают данные |
 |---|---|---|---|
-| PostgreSQL `blood_tests` (сырые `values`) | **дашборд** (`dashboard_generator._load_biomarkers_from_db` → `aggregate_biomarkers`) **и агент** (`/recent_biomarkers`, `/phenoage`) | канонизируется на лету `to_canonical` | `scripts/import/kb_to_blood_tests.py` |
+| PostgreSQL `blood_tests` (сырые `values`) | **дашборд** (`dashboard_generator._load_biomarkers_from_db` → `aggregate_biomarkers`) **и агент** (`/recent_biomarkers`, `/phenoage`) | канонизируется на лету `to_canonical` | `scripts/import/kb_to_blood_tests.py` **и** `/doc` в боте (см. ниже) |
 | `/app/data/kb/kb_<id>.json` (bind-mount) | агент (`/kb_value`, `/list_kb_keys`) | сырой полный KB | `scripts/sync_family_kb.py --apply` |
 
 Дашборд **больше не читает файл** `biomarkers_<id>.json` — он берёт биомаркеры из Postgres (durable, не теряются при rebuild контейнера — раньше у 4 family-юзеров дашборды пустели после деплоя). Legacy-fallback `BOTKIN_LEGACY_BIOMARKERS_JSON` удалён 11.06.2026 (аудит): флаг нигде не включался.
+
+**Третий писатель — `/doc` в боте (#281, 25.07.2026).** Когда пользователь сам грузит анализ через `/doc` и жмёт «Сохранить», `handlers/doc_upload._save_to_blood_tests` пишет показатели прямо в `blood_tests` (маппер `core/health/doc_to_blood_test.py` → `crud.upsert_blood_test`), минуя мак и `sync_user_health`. Правила те же: сырые ключи, канонизация на чтении. Ключ идемпотентности — `(user_id, test_date, test_type)`, где `test_type` = `«<лаборатория> · <8hex контент-хэша файла>»`. Нелабораторные документы (УЗИ, заключения) в `blood_tests` не попадают — их отсекает гейт `to_canonical`; они остаются в `documents[]`. Нет даты в документе — строки нет (дату не выдумываем).
+
+⚠️ **Следствие:** данные от `/doc` живут только на сервере, в локальном `~/FamilyHealth/<юзер>/knowledge_base.json` их нет. `sync_user_health` их **не затрёт** (upsert без DELETE), но и не подтянет обратно на мак. Если нужно свести — переносить в локальный KB руками.
 
 **Когда добавил новый анализ в KB → одна команда для ЛЮБОГО юзера:**
 ```bash
@@ -135,6 +139,8 @@ python3 scripts/sync_user_health.py --user <telegram_id> --apply   # или --al
 | Сон, стресс, HRV, Body Battery | Garmin API | `data/garmin/{sleep,stress,hrv,body-battery}/` | то же |
 | Тренировки | Garmin API | `data/garmin/activities/` | то же |
 | Вес, жир, висцеральный жир | Zepp API (CN3) | `data/zepp_export_latest.csv` | `scripts/import/zepp_api.py` (токен ~7 дней, reauth через `--code URL`) |
+| Вес + ПОЛНЫЙ состав тела (мышцы, вода, кости, висцеральный жир) | Withings API (весы Body Smart) | таблица `weights` (`source='withings'`) | `scripts/import/withings_api.py --user <tg_id> --push-api --min-weight <кг>` (пишет через `POST /api/agent/log_body_composition` с `BOTKIN_PAT`, доступ к серверу не нужен). Нужен, потому что **в HealthKit нет типов** для мышечной массы/воды/костной массы/висцерального жира — через HAE доходят только вес, % жира и безжировая масса. Апсерт с COALESCE (канал HAE не перетирается). Креды `WITHINGS_CLIENT_ID/SECRET/REFRESH_TOKEN`; refresh **ротируется** → `data/cache/withings_tokens.json` |
+| ↳ *канал записи для внешних весов* | — | таблица `weights` | `POST /api/agent/log_body_composition` (PAT+JWT, scope `rw`). **Предпочтительный путь** для импортёров с чужой машины: `user_id` берётся из токена, RLS изолирует данные, доступ к прод-серверу и суперюзер Postgres не нужны. `measured_at` обязан нести офсет (это ключ идемпотентности), `source` — имя канала; `manual`/`llm_text` зарезервированы за ручным вводом (#170). Заменяет схему «ssh + `docker exec psql`» из `zepp_csv.py`, которая требует членства в docker-группе = root на хосте |
 | Воздух дома | Netatmo API | `data/environment/netatmo_history.json` | `scripts/import/netatmo.py` |
 | Погода | Open-Meteo | `data/weather/weather_history.json` | `scripts/import/weather.py` |
 | Глюкоза (CGM) | LibreLinkUp API (Abbott FreeStyle Libre 3) | таблица `glucose_readings` (mmol/L) | `scripts/import/librelinkup.py` (follower `dr@botkin.health`, регион EU; маппинг `cgm_connections`; онбординг `/connect_cgm`) |
@@ -335,6 +341,8 @@ python3 scripts/sync_user_health.py --all --apply
 - ❌ Читать items только по одному ключу (`it["food"]`) — есть 3 схемы одновременно; использовать `_item_name()` из `core/food/fiber_table.py`
 - ❌ Писать items без поля `fiber` — прогонять через `enrich_items_with_fiber()` перед INSERT
 - ❌ Писать в orphan-таблицы `daily_summaries / sleep_records` — они не управляются ORM и пусты на проде. В `blood_pressure_logs / workouts` пишут только штатные raw-SQL пути (`webhook/apple_health.py`, `webhook/agent_tools_api.py`) — новые записи добавлять через них, не через ORM
+- ❌ **Держать открытую транзакцию Postgres поперёк долгого сетевого вызова** (LLM, внешний API). Сессии живут с `idle_in_transaction_session_timeout` (15с, `database/__init__.py`) — Postgres обрывает такое соединение, следующий запрос падает с `OperationalError`. Перед сетью закрывать транзакцию (`_end_open_tx` в `core/agent_chat.py`). Транзакцию открывают не только записи: после `commit()` ORM-объект истекает (`expire_on_commit=True`), и **чтение его атрибута** тянет refresh-SELECT. Прецедент #347 (26.07.2026): агент терял ответы, и чем содержательнее ответ — тем вероятнее терялся
+- ❌ Ронять уже полученный от LLM ответ из-за сбоя записи в БД — генерация оплачена. Логировать сбой персистентности, но ответ пользователю отдавать (`_persist_turn`)
 
 ---
 
@@ -394,6 +402,11 @@ Notion-страница **«Хронолог разработки»** (ID `37bf1
    - `ecg`, `spirometry`, `sports_tests` — функциональные тесты
 3. **Только после этого** — читать отдельные PDF/docx для деталей, которых нет в JSON.
 
+**⚠️ Граница «источника истины» — по типу данных (уточнено 12.07.2026):**
+- **Живые ежедневные потоки** — питание (`nutrition_log`), БАДы (`supplements_log`), вес/состав тела (`body_measurements`), глюкоза (`glucose_readings`), функциональные замеры (сила хвата и т.п.) — **первичны в БД Botkin (Postgres на сервере), локальный `knowledge_base.json` для них может быть УСТАРЕВШИМ**. По ним читать сначала БД (agent_tools / psql), KB — только бэкап.
+- **Курируемые документы** — анализы крови, генетика, УЗИ/МРТ, мед.записи — первичны в `knowledge_base.json` на маке (я их парсю и завожу).
+- Направление желаемой эволюции (по решению Александра 12.07): постепенно перейти на работу через Botkin как основную систему, локальную KB держать как бэкап и периодически обновлять снимок из БД (dump DB → JSON). Маркер продублирован первой строкой каждого `knowledge_base.json` (`_source_of_truth`).
+
 **Если добавили новые анализы/УЗИ в `knowledge_base.json` — обязательно регенерировать журнал:**
 ```bash
 python3 scripts/generate_exam_journal.py "Имя — Здоровье" --update-profile
@@ -450,6 +463,25 @@ AI-врач живёт **внутри** основного aiogram-бота (`@B
 Ключевые agent tools: `get_weight_history`, `get_body_measurements`, `get_day_summary`, `get_indoor_air`, `get_outdoor_weather`, `get_user_settings`, `recent_workouts`, `recent_biomarkers`, `phenoage`, `kb_value`, `list_kb_keys`.
 
 Решение принято 21.05.2026 вместо NanoClaw (отдельной контейнерной инфры). Подробнее — [ADR-0002](docs/architecture/decisions/0002-rejecting-nanoclaw-for-simpler-agent.md).
+
+### Медпрофиль пациента: аллергии, хроники, постоянные лекарства
+
+Живёт в `users.onboarding_data` (JSONB). Единый реестр ключей и сплиттер свободного текста — **`core/health/onboarding_lists.py`** (`CONDITION_KEYS`, `ALLERGY_KEYS`, `onboarding_list`, `split_freetext`). Новые читатели/писатели подключать только через него — «куда пишем» должно совпадать с «откуда читаем».
+
+⚠️ **Онбординг-квиз про хроники и лекарства НЕ спрашивает** — шаг убран в `f366c98` («value-first quiz»), legacy-шаг `chronic` ремапится на `artifact`. Не искать этот вопрос в онбординге и не считать, что профиль заполнится сам.
+
+| | Кто | Что делает |
+|---|---|---|
+| **Пишут** | `/doc` (`telegram-bot/handlers/doc_upload.py`) | диагнозы/аллергии из разобранного документа → `merge_onboarding_lists` |
+| | агент, тул `save_health_profile` | со слов пациента в диалоге; ставит флаг `health_profile_asked` |
+| **Читают** | `core/agent_chat.py::_health_profile_block` | блок «Медпрофиль» в системном промпте (+ курение из `users.smoking_status`) |
+| | `core/agent_chat.py::_health_profile_ask_block` | инструкция спросить один раз, если профиль пуст и флага нет |
+| | `/meal_context` (`webhook/agent_tools_api.py`) | `constraints` — KB-файл приоритетнее, затем `onboarding_data`; источник в `constraints_source` |
+| | `services/doctor_report.py` | «проблемы»/аллергии/лекарства в отчёте для врача |
+
+Курение — отдельная колонка `users.smoking_status` (`never`/`former`/`current`/`occasional`), не в `onboarding_data`. Её читают промпт-блок, дашборд и `/user_profile`.
+
+История: #340 (курение в промпт, fallback `/meal_context`, `save_health_profile`), #7/#309 (сплиттер: запятая не разделитель пунктов).
 
 ---
 

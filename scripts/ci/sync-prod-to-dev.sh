@@ -72,6 +72,7 @@ SKIP_TABLES=(
   llm_usage_log
   daily_summaries
   sleep_records
+  user_feedback   # триаж фидбека — на проде (админы + agent-tools); дев-копия не нужна
 )
 
 log()  { printf '%s %s\n' "[$(date -u +%H:%M:%S)]" "$*"; }

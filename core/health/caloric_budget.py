@@ -16,6 +16,15 @@ WARN_THRESHOLD = 0.80  # warn when consumed ≥ 80% of target
 DEFAULT_TOTAL = 2150  # fallback if no Garmin data (≈ avg from analysis)
 DEFAULT_GOAL_PCT = -15  # default calorie goal: 15% deficit
 
+# День считается «неполным» (частичный синк Garmin), если накопленный BMR дня
+# ниже этой доли от 14-дневного среднего BMR пользователя. BMR растёт линейно
+# в течение дня, поэтому низкий дневной BMR = часы не досинкали день. Порог
+# относительный, а не абсолютный — абсолютный (1500) ломается для пользователей
+# с низким BMR (~1400).
+INCOMPLETE_BMR_RATIO = 0.85
+# Абсолютный fallback, когда средний BMR пользователя неизвестен.
+MIN_PLAUSIBLE_TDEE = 1500
+
 
 def get_day_actual_tdee(user_id: int, for_date: date_type, db=None) -> Optional[float]:
     """Фактический расход энергии (BMR + активные) за конкретный день из activity_log.
@@ -46,6 +55,52 @@ def get_day_actual_tdee(user_id: int, for_date: date_type, db=None) -> Optional[
         if act.bmr_calories and act.active_calories:
             return float(act.bmr_calories) + float(act.active_calories)
         return None
+    finally:
+        if own:
+            db.close()
+
+
+def get_day_energy_fact(user_id: int, for_date: date_type, avg_bmr: Optional[float] = None, db=None) -> dict:
+    """Факт расхода за день + оценка полноты Garmin-данных.
+
+    Для завершённого дня фактический TDEE — истина (в отличие от прогноза по
+    среднему), но только если синк был полным. Полноту оцениваем по BMR дня
+    относительно среднего BMR пользователя (см. INCOMPLETE_BMR_RATIO).
+
+    Returns:
+        {'tdee': float|None, 'bmr': float|None, 'active': float|None, 'incomplete': bool}
+        incomplete=True — данные битые/частичные, tdee дня доверять нельзя.
+    """
+    own = db is None
+    if own:
+        from database import SessionLocal
+
+        db = SessionLocal()
+    try:
+        from database import get_activity_by_date
+
+        act = get_activity_by_date(db, user_id, for_date)
+        if not act:
+            return {"tdee": None, "bmr": None, "active": None, "incomplete": True}
+
+        bmr = float(act.bmr_calories) if act.bmr_calories else None
+        if act.total_calories and act.total_calories > 0:
+            tdee = float(act.total_calories)
+        elif act.bmr_calories and act.active_calories:
+            tdee = float(act.bmr_calories) + float(act.active_calories)
+        else:
+            tdee = None
+
+        active = max(0.0, tdee - bmr) if (tdee and bmr) else None
+
+        if tdee is None:
+            incomplete = True
+        elif bmr and avg_bmr and avg_bmr > 0:
+            incomplete = bmr < INCOMPLETE_BMR_RATIO * avg_bmr
+        else:
+            incomplete = tdee < MIN_PLAUSIBLE_TDEE
+
+        return {"tdee": tdee, "bmr": bmr, "active": active, "incomplete": incomplete}
     finally:
         if own:
             db.close()
@@ -117,6 +172,26 @@ def get_daily_budget(
                 bmr_avg = round(avg_stats.get("bmr_calories", 0))
                 total_avg = round(avg_stats.get("total_calories", 0))
 
+        # ── Adaptive TDEE (питание + вес, метод MacroFactor) ────────────────────
+        # Самый честный источник maintenance: закрывает энергобаланс по факту
+        # съеденного и динамике веса. Приоритетнее девайсов и manual — но
+        # включается только при достатке данных (≥21 день лога, ≥2 взвешивания
+        # с разбросом ≥14 дней), иначе None и остаёмся на цепочке выше.
+        from core.health.adaptive_tdee import get_adaptive_tdee
+
+        tdee_days = None
+        # Девайсовые значения до adaptive-подмены: activity_avg для отображения
+        # обязан оставаться честным девайсовым средним (адаптивный TDEE − BMR —
+        # выдуманное число), а ярлык нужен для отката, если цель прошедшего дня
+        # посчитается от факта девайса.
+        device_source_label = source_label
+        device_total_avg = total_avg
+        adaptive = get_adaptive_tdee(user_id, as_of=today, db=db)
+        if adaptive:
+            total_avg = adaptive["tdee"]
+            source_label = "adaptive"
+            tdee_days = adaptive["days_used"]
+
         # ── Default fallback (no wearable, no manual setup) ─────────────────────
         if not total_avg:
             total_burned = DEFAULT_TOTAL
@@ -124,21 +199,43 @@ def get_daily_budget(
             has_garmin = False
         else:
             total_burned = total_avg
-            has_garmin = source_label in ("garmin", "apple_health")
+            has_garmin = source_label in ("garmin", "apple_health", "adaptive")
 
         if calorie_goal_pct is None:
             calorie_goal_pct = s.calorie_goal_pct if s and s.calorie_goal_pct is not None else DEFAULT_GOAL_PCT
         ratio = 1.0 + calorie_goal_pct / 100.0  # -15 → 0.85, 0 → 1.0, +10 → 1.10
 
-        # Today-boost: цель считается по max(среднее, фактический расход за день).
-        # В день тяжёлой тренировки фактический TDEE из Garmin выше среднего → цель
-        # растёт, юзер не «недоедает». В неполный/ленивый день factual < среднего →
-        # выигрывает среднее, цель не падает. Среднее (activity_avg/bmr_avg ниже)
-        # остаётся для отображения как было — поднимается только сама цель.
-        actual_tdee = get_day_actual_tdee(user_id, today, db=db)
-        if actual_tdee and actual_tdee > total_burned:
-            total_burned = actual_tdee
-            has_garmin = True
+        # Прошедший день vs сегодня — разная семантика цели (фикс 02.07.2026):
+        #
+        # • Сегодня — прогноз: max(среднее, фактический расход на текущий момент).
+        #   Today-boost поднимает цель в день тяжёлой тренировки, а в ленивый/
+        #   недосинканный день среднее не даёт цели упасть (день ещё не закончен).
+        #
+        # • Прошедший день — факт: день закончен, Garmin-данные финальны, поэтому
+        #   цель честно считается от фактического расхода дня (даже если он ниже
+        #   среднего — иначе в ленивые дни «остаток» разрешал переедать: июнь-2026
+        #   просел до ~4% дефицита при цели 15%). Если данные дня битые (частичный
+        #   синк, BMR дня « среднего) — оставляем оценку по среднему и ставим флаг
+        #   data_incomplete: UI не должен показывать «перебор» по мусорным данным.
+        data_incomplete = False
+        real_today = datetime.now(user_tz).date()
+        if today < real_today:
+            fact = get_day_energy_fact(user_id, today, avg_bmr=bmr_avg, db=db)
+            if fact["tdee"] and not fact["incomplete"]:
+                total_burned = fact["tdee"]
+                has_garmin = True
+                if source_label == "adaptive":
+                    # Цель посчитана от факта девайса — подпись «по вашим
+                    # данным за N дней» здесь лгала бы.
+                    source_label = device_source_label or "default"
+                    tdee_days = None
+            else:
+                data_incomplete = True
+        else:
+            actual_tdee = get_day_actual_tdee(user_id, today, db=db)
+            if actual_tdee and actual_tdee > total_burned:
+                total_burned = actual_tdee
+                has_garmin = True
         target = round(total_burned * ratio)
 
         # --- Consumed: today's nutrition_log ---
@@ -150,8 +247,10 @@ def get_daily_budget(
 
         # Activity = total − bmr. Derived (NOT from active_calories field) because
         # Apple Health may overwrite that field, breaking the (total = bmr + active)
-        # invariant. Keeps display math internally consistent.
-        activity_avg = (total_avg - bmr_avg) if (bmr_avg and total_avg) else None
+        # invariant. Keeps display math internally consistent. Считается от
+        # ДЕВАЙСОВОГО среднего (device_total_avg == total_avg, когда adaptive
+        # не применился): «адаптивный TDEE − девайсовый BMR» — выдуманное число.
+        activity_avg = (device_total_avg - bmr_avg) if (bmr_avg and device_total_avg) else None
         if activity_avg is not None and activity_avg < 0:
             activity_avg = 0
         return {
@@ -164,8 +263,14 @@ def get_daily_budget(
             "bmr_avg": bmr_avg,
             "activity_avg": activity_avg,
             "tdee_avg": total_avg,
-            "bmr_source": source_label,  # 'garmin' | 'apple_health' | 'manual' | 'default'
+            "bmr_source": source_label,  # 'adaptive' | 'garmin' | 'apple_health' | 'manual' | 'default'
+            # Сколько полных дней лога питания легло в адаптивную оценку
+            # (для подписи «по вашим данным за N дней»); None для других источников.
+            "tdee_days": tdee_days,
             "calorie_goal_pct": calorie_goal_pct,
+            # True для прошедшего дня с битым/частичным синком Garmin: цель — оценка
+            # по среднему, вердикт «перебор» показывать нельзя.
+            "data_incomplete": data_incomplete,
         }
     except Exception as e:
         logger.warning(f"get_daily_budget failed: {e}")
@@ -217,7 +322,11 @@ def format_budget_line(user_id: int, for_date: Optional[date_type] = None, show_
 
     # Progress bar: 10 colored squares
     filled = min(10, round(pct / 10))
-    if remaining < 0:
+    if b.get("data_incomplete"):
+        icon = "⚠️"
+        sq_fill = "🟧"
+        tail = "Garmin-данные дня неполные — итог оценочный"
+    elif remaining < 0:
         icon = "🔴"
         sq_fill = "🟥"
         tail = f"перебор +{abs(remaining)} ккал"

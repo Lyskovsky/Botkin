@@ -328,6 +328,8 @@ class BodyMeasurement(Base):
     chest_cm: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     thigh_cm: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     biceps_cm: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    grip_right_kg: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    grip_left_kg: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=True
@@ -358,6 +360,7 @@ class UserSettings(Base):
     # -15 = 15% deficit (lose weight), 0 = maintenance, +10 = 10% surplus (gain).
     calorie_goal_pct: Mapped[int] = mapped_column(Integer, default=-15, server_default="-15")
     supplement_reminders_enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    feedback_opt_out: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     supplement_reminder_time: Mapped[time] = mapped_column(Time, server_default="08:00:00")
     supplements: Mapped[list] = mapped_column(JSONBCompat, default=list, server_default="[]")
     # Meal-logging reminders (opt-in). Fixed daily slots in the user's local timezone.
@@ -434,6 +437,112 @@ class FoodInteraction(Base):
     bot_reply: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     nutrition_log_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'saved'"))
+
+
+class UserFeedback(Base):
+    """Инбокс обратной связи (#188, Фаза 1 — захват).
+
+    Один инбокс для всех каналов: /feedback (command), агент (flag_for_devs),
+    и позже кнопка мини-аппа (webapp). Nullable-поля priority/github_issue/
+    dedup_of/resolved_at/notified_at заведены под Фазы 2-3, Фаза 1 их не пишет.
+    """
+
+    __tablename__ = "user_feedback"
+    __table_args__ = (
+        CheckConstraint(
+            "kind IN ('bug','feature','question','unspecified')",
+            name="user_feedback_kind_check",
+        ),
+        CheckConstraint(
+            "source IN ('command','agent','webapp')",
+            name="user_feedback_source_check",
+        ),
+        CheckConstraint(
+            "status IN ('new','triaged','in_progress','done','wontfix','duplicate')",
+            name="user_feedback_status_check",
+        ),
+        Index("idx_user_feedback_status_created", "status", text("created_at DESC")),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True)
+    # user_id — без hard-FK на users.telegram_id намеренно: аудит-след переживает удаление юзера.
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False, server_default="unspecified")
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    source: Mapped[str] = mapped_column(String(16), nullable=False)
+    agent_context: Mapped[Optional[dict]] = mapped_column(JSONBCompat, nullable=True)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, server_default="new")
+    priority: Mapped[Optional[str]] = mapped_column(String(4), nullable=True)
+    github_issue: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    dedup_of: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    resolved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    notified_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class VerifiedProduct(Base):
+    """Справочник проверенных продуктов (#255).
+
+    Точные КБЖУ с этикетки для упакованных продуктов — чтобы LLM-vision не
+    оценивал один и тот же батончик заново (и с ошибками) при каждом фото.
+    user_id NULL = общая запись, видимая всем пользователям; иначе — личная.
+
+    Наполняется автоматически (кнопка «Запомнить продукт» после исправления
+    КБЖУ или фото этикетки) и сид-скриптом. Ручного CRUD нет намеренно:
+    предыдущая инкарнация /my_products умерла с 0 строк за всё время жизни
+    (удалена 2026-04-21, см. AI_CHANGELOG).
+
+    name_norm — нормализованное имя (core.food.verified_products.
+    normalize_product_name), поддерживается приложением. Уникальность — два
+    частичных индекса: (user_id, name_norm) для личных записей и (name_norm)
+    для общих; обычный UNIQUE не работает из-за NULL в user_id.
+    """
+
+    __tablename__ = "verified_products"
+    __table_args__ = (
+        CheckConstraint(
+            "source IN ('user_correction','label_photo','manual','import')",
+            name="verified_products_source_check",
+        ),
+        Index(
+            "uq_verified_products_user_name",
+            "user_id",
+            "name_norm",
+            unique=True,
+            postgresql_where=text("user_id IS NOT NULL"),
+            sqlite_where=text("user_id IS NOT NULL"),
+        ),
+        Index(
+            "uq_verified_products_global_name",
+            "name_norm",
+            unique=True,
+            postgresql_where=text("user_id IS NULL"),
+            sqlite_where=text("user_id IS NULL"),
+        ),
+        Index("idx_verified_products_barcode", "barcode"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True)
+    user_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger, ForeignKey("users.telegram_id", ondelete="CASCADE"), nullable=True
+    )
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    name_norm: Mapped[str] = mapped_column(String(255), nullable=False)
+    brand: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    aliases: Mapped[Optional[list]] = mapped_column(JSONBCompat, nullable=True)
+    barcode: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    calories_per_100g: Mapped[float] = mapped_column(Float, nullable=False)
+    protein_per_100g: Mapped[float] = mapped_column(Float, nullable=False)
+    fats_per_100g: Mapped[float] = mapped_column(Float, nullable=False)
+    carbs_per_100g: Mapped[float] = mapped_column(Float, nullable=False)
+    fiber_per_100g: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    portion_g: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    source: Mapped[str] = mapped_column(Text, nullable=False)
+    times_used: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
 
 
 class AuditLog(Base):
@@ -642,3 +751,115 @@ class HealthReport(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
     )
+
+
+class PersonalAccessToken(Base):
+    """Долгоживущий PAT для MCP-коннектора Claude Desktop (#228).
+
+    Пользователь сам выпускает токен в боте/мини-аппе (self-service, без ручной
+    выдачи Александром). Коннектор обменивает его на короткоживущий JWT через
+    POST /api/agent/exchange_pat_for_jwt, дальше дёргает существующие /api/agent/*.
+
+    Формат токена: ``pat_<telegram_id>_<hex32>`` (зеркалит ``hvt_`` Apple Health).
+    Scope:
+      • ``rw`` — личный токен владельца (чтение + запись);
+      • ``ro`` — read-only, эту строку владелец отдаёт врачу/близкому, чтобы
+        поделиться своими данными без права что-либо менять.
+    Отзыв — выставлением ``revoked_at`` (старый токен сразу перестаёт работать).
+    """
+
+    __tablename__ = "personal_access_tokens"
+    __table_args__ = (
+        CheckConstraint("scope IN ('ro', 'rw')", name="personal_access_tokens_scope_check"),
+        Index("ix_personal_access_tokens_token", "token", unique=True),
+        Index("ix_personal_access_tokens_user_id", "user_id"),
+    )
+
+    # BigInteger PK; на sqlite (тесты) рендерим как Integer, иначе нет автоинкремента.
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer(), "sqlite"), primary_key=True, autoincrement=True
+    )
+    # Чьи данные открывает токен. FK на users.telegram_id (PK таблицы users), НЕ на users.id.
+    user_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("users.telegram_id", ondelete="CASCADE"), nullable=False
+    )
+    # Уникальность обеспечивает явный индекс ix_personal_access_tokens_token (см. __table_args__),
+    # который зеркалит миграцию pat0token01. Column-level unique=True здесь НЕ ставим — иначе
+    # SQLAlchemy добавит вдобавок безымянный UniqueConstraint, которого нет в миграции, и alembic
+    # check ловит расхождение ORM↔схема ("New upgrade operations detected: add UniqueConstraint(token)").
+    token: Mapped[str] = mapped_column(String(128), nullable=False)
+    # Человекочитаемая метка («Мой ноут», «Психолог Ника») — задаёт пользователь.
+    name: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    scope: Mapped[str] = mapped_column(String(2), default="rw", server_default="rw", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    last_used_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Аудит: кто выпустил токен (telegram_id). В self-service-потоке == user_id.
+    created_by_user: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+    @property
+    def is_active(self) -> bool:
+        """Токен действителен, пока не отозван."""
+        return self.revoked_at is None
+
+
+class FunnelEvent(Base):
+    """Событие продуктовой воронки онбординга/активации.
+
+    Отдельно от audit_log (тот про админ-DML). user_id без FK намеренно
+    (событие может опережать полную запись юзера). RLS (агент не читает) —
+    в миграции, не в ORM.
+    """
+
+    __tablename__ = "funnel_events"
+
+    # BigInteger PK; на sqlite (тесты) рендерим как Integer, иначе нет автоинкремента
+    # (см. тот же приём у PersonalAccessToken.id выше).
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer(), "sqlite"), primary_key=True, autoincrement=True
+    )
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    event: Mapped[str] = mapped_column(String(40), nullable=False)
+    track: Mapped[Optional[str]] = mapped_column(String(8), nullable=True)
+    source: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    meta: Mapped[Optional[dict]] = mapped_column(JSONBCompat, default=dict)
+
+    __table_args__ = (
+        Index("idx_funnel_event_ts", "event", text("ts DESC")),
+        Index(
+            "idx_funnel_once",
+            "user_id",
+            "event",
+            unique=True,
+            sqlite_where=text("event IN ('first_food_logged','first_agent_question')"),
+            postgresql_where=text("event IN ('first_food_logged','first_agent_question')"),
+        ),
+    )
+
+
+_ONCE_EVENTS = {"first_food_logged", "first_agent_question"}
+
+
+def log_event(db, user_id, event, track=None, source=None, meta=None, once=False):
+    """Записать событие воронки. once=True (или «первое» событие) → идемпотентно
+    (полагается на partial-unique-индекс idx_funnel_once; дубликат гасится).
+    Коммит — на вызывающей стороне."""
+    from sqlalchemy.exc import IntegrityError
+
+    ev = FunnelEvent(user_id=user_id, event=event, track=track, source=source, meta=meta or {})
+    if once or event in _ONCE_EVENTS:
+        # db.add() must happen INSIDE the SAVEPOINT: adding beforehand and
+        # only wrapping flush() leaves the pending object attached to the
+        # outer transaction, so a failed flush marks the *whole* session
+        # transaction deactive (not just the savepoint) — verified empirically,
+        # matches the pattern in SQLAlchemy's own begin_nested() docs.
+        try:
+            with db.begin_nested():
+                db.add(ev)
+                db.flush()
+        except IntegrityError:
+            pass
+    else:
+        db.add(ev)
+    return ev

@@ -384,6 +384,22 @@ def test_sleep_hours_summed():
     assert result[d]["sleep_hours"] == pytest.approx(8.0, rel=0.01)
 
 
+def test_sleep_hours_overlapping_sessions_not_double_counted():
+    """Сон: пересекающиеся сессии (ре-синк истории от Health Connect) мёрджатся, не суммируются наивно."""
+    payload = make_payload(
+        sleep=[
+            # основная сессия: 23:00 → 06:00 (7ч)
+            {"session_end_time": "2026-06-10T06:00:00Z", "duration_seconds": 25200},
+            # дубль/пере-синк той же ночи, пересекается с первой (04:00 → 06:30)
+            {"session_end_time": "2026-06-10T06:30:00Z", "duration_seconds": 9000},
+        ]
+    )
+    result = _hc_aggregate_by_day(payload, MSK)
+    d = date(2026, 6, 10)
+    # Наивная сумма дала бы 7 + 2.5 = 9.5ч. Правильный мёрдж: 23:00 → 06:30 = 7.5ч.
+    assert result[d]["sleep_hours"] == pytest.approx(7.5, rel=0.01)
+
+
 # ── _hc_aggregate_by_day: distance ───────────────────────────────────────────
 
 

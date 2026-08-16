@@ -13,7 +13,7 @@ from core.infra.tz import get_user_tz  # noqa: E402
 from core.health.garmin_data import get_garmin_data_for_date, sync_today_garmin
 from core.health.weekly_nutrition import analyze_weekly_nutrition
 from core.health.nutrition_targets import check_feasibility
-from config.users import ADMIN_USER_ID, is_admin
+from config.users import is_admin
 from config.settings import public_base_url
 # NOTE: SupplementService imported per-request to support multi-user
 
@@ -77,7 +77,8 @@ async def cmd_start(message: Message, user_id: int, username: str, first_name: s
         "/week — анализ недели\n"
         "/vitamins — чек-лист добавок\n"
         "/share — личный дашборд здоровья\n"
-        "/report — HTML-отчёт о здоровье (ссылка)\n"
+        "/report — снимок дашборда (постоянная ссылка)\n"
+        "/doctor_report — PDF-отчёт для врача (файл)\n"
         "/profile — твои данные (вес, рост, возраст)\n"
         "/help — полная справка\n\n"
         "🌐 botkin.health",
@@ -204,25 +205,38 @@ async def cmd_day(message: Message, user_id: int):
         target_cal = targets["calories"]
 
         deficit_pct = round((1 - 0.85) * 100)  # 15%
+        # Завершённый день: цель посчитана от факта дня (см. get_day_stats),
+        # подписываем это явно, чтобы цифра не расходилась с (BMR+ср.актив)×0.85.
+        is_past_day = today_date < real_today
+        goal_suffix = " от факта дня" if (is_past_day and not stats.get("data_incomplete")) else ""
+        # Адаптивный TDEE (питание+вес): подписываем источник, чтобы было видно,
+        # что цель посчитана по собственным данным, а не по оценке девайса.
+        if targets.get("tdee_source") == "adaptive" and targets.get("tdee_days"):
+            goal_suffix += f" · по вашим данным за {targets['tdee_days']} дн."
         if avg_total > 1500:
             if garmin_error:
                 active_line = f"🏃 ⚠️ Garmin недоступен · {avg_active} в среднем"
             else:
-                active_line = f"🏃 {today_active_r} ккал сегодня · {avg_active} в среднем"
+                active_line = f"🏃 {today_active_r} ккал {activity_label} · {avg_active} в среднем"
             energy_line = (
                 f"💤 {avg_bmr} ккал — базовый расход\n"
                 f"{active_line}\n"
-                f"🎯 {target_cal} ккал — цель (дефицит −{deficit_pct}%)"
+                f"🎯 {target_cal} ккал — цель (дефицит −{deficit_pct}%{goal_suffix})"
             )
         else:
             energy_line = (
-                f"🏃 {today_active_r} ккал — активность сегодня\n🎯 {target_cal} ккал — цель (дефицит −{deficit_pct}%)"
+                f"🏃 {today_active_r} ккал — активность сегодня\n"
+                f"🎯 {target_cal} ккал — цель (дефицит −{deficit_pct}%{goal_suffix})"
             )
 
         # --- Calorie bar ---
         cal_bar, cal_pct = make_block_bar(totals.calories, target_cal)
         cal_remaining = target_cal - round(totals.calories)
-        if cal_remaining < 0:
+        data_incomplete = stats.get("data_incomplete", False)
+        if data_incomplete:
+            # Битый Garmin-день: цель оценочная, вердикт «перебор» не выносим.
+            cal_tail = "итог оценочный ⚠️"
+        elif cal_remaining < 0:
             cal_tail = f"перебор +{abs(cal_remaining)}"
         else:
             cal_tail = f"ост. {cal_remaining}"
@@ -274,6 +288,13 @@ async def cmd_day(message: Message, user_id: int):
         if weight_text:
             response_parts.append(weight_text)
         response_parts.append(supplements_text)
+
+        # Data quality warning — битый Garmin-день, вердикт не выносим
+        if data_incomplete:
+            response_parts.append(
+                "\n⚠️ <i>Garmin-данные за этот день неполные (частичный синк) — "
+                "расход неизвестен, итог по калориям оценочный.</i>"
+            )
 
         # Feasibility Warning
         feasibility_warning = check_feasibility(remaining["calories"], remaining["protein"])
@@ -641,8 +662,8 @@ async def cmd_block(message: Message, user_id: int):
         await message.answer("Использование: /block <telegram_id>")
         return
     target_id = int(parts[1])
-    if target_id == ADMIN_USER_ID:
-        await message.answer("❌ Нельзя заблокировать себя.")
+    if is_admin(target_id):
+        await message.answer("❌ Нельзя заблокировать администратора.")
         return
 
     from database import SessionLocal
@@ -763,12 +784,12 @@ async def cmd_share(message: Message, user_id: int):
 
 @router.message(Command("report"))
 async def cmd_report(message: Message, user_id: int):
-    """/report — сгенерировать/обновить персональный HTML-отчёт о здоровье и получить ссылку."""
+    """/report — сгенерировать/обновить снимок дашборда (постоянная ссылка для шаринга)."""
     from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
     from database import SessionLocal
 
-    await message.answer("⏳ Генерирую отчёт…")
+    await message.answer("⏳ Готовлю снимок дашборда…")
 
     db = SessionLocal()
     try:
@@ -782,12 +803,12 @@ async def cmd_report(message: Message, user_id: int):
         db.close()
 
     url = f"{public_base_url()}/r/{token}"
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📋 Открыть отчёт", url=url)]])
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📋 Открыть снимок", url=url)]])
 
     if diff:
-        intro = f"✅ Отчёт обновлён ({diff})."
+        intro = f"✅ Снимок дашборда обновлён ({diff})."
     else:
-        intro = "✅ Отчёт готов."
+        intro = "✅ Снимок дашборда готов."
 
     await message.answer(
         f"{intro}\n\n"
@@ -796,6 +817,58 @@ async def cmd_report(message: Message, user_id: int):
         parse_mode="HTML",
         reply_markup=keyboard,
     )
+
+
+_DOCTOR_REPORT_LANG_ALIASES = {
+    "en": "en",
+    "eng": "en",
+    "english": "en",
+    "английский": "en",
+    "англ": "en",
+    "ru": "ru",
+    "rus": "ru",
+    "russian": "ru",
+    "русский": "ru",
+}
+
+
+def parse_doctor_report_lang(text: str | None, tg_language_code: str | None) -> str:
+    """Из текста '/doctor_report <lang>' + language_code → 'ru'|'en'.
+
+    Явный алиас перебивает; неизвестный/пустой аргумент → резолв по language_code.
+    """
+    from services.report_i18n import resolve_report_language
+
+    explicit = None
+    parts = (text or "").split()
+    if len(parts) >= 2:
+        explicit = _DOCTOR_REPORT_LANG_ALIASES.get(parts[1].strip().lower())
+    return resolve_report_language(explicit, tg_language_code)
+
+
+@router.message(Command("doctor_report"))
+async def cmd_doctor_report(message: Message, user_id: int):
+    """/doctor_report [ru|en] — PDF-отчёт для врача, приходит документом в чат."""
+    from database import SessionLocal
+    from services.doctor_report import send_doctor_report_to_chat
+    from services.report_i18n import CHROME
+
+    lang_code = message.from_user.language_code if message.from_user else None
+    lang = parse_doctor_report_lang(message.text, lang_code)
+    chrome = CHROME[lang]
+
+    await message.answer(chrome["status_preparing"])
+
+    db = SessionLocal()
+    try:
+        result = send_doctor_report_to_chat(db, user_id, lang=lang)
+    finally:
+        db.close()
+
+    if result.get("sent"):
+        await message.answer(chrome["status_done"])
+    else:
+        await message.answer(chrome["status_failed"])
 
 
 @router.message(Command("health_token"))

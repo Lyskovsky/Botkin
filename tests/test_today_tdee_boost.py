@@ -8,7 +8,7 @@
 плюс рост по факту тренировки.
 """
 
-from datetime import date, timezone
+from datetime import date, datetime, timezone
 from unittest.mock import patch, MagicMock
 
 from core.health.nutrition_targets import calculate_targets
@@ -115,11 +115,14 @@ def _patched_budget(today_tdee):
 
 
 def test_get_daily_budget_boosts_target_on_heavy_day():
+    # Boost-семантика действует только для СЕГОДНЯ: для прошедших дней с 02.07.2026
+    # цель считается от факта дня (см. tests/test_day_energy_fact.py).
+    today = datetime.now(timezone.utc).date()
     patches = _patched_budget(today_tdee=2416)
     for p in patches:
         p.start()
     try:
-        b = get_daily_budget(user_id=895655, for_date=date(2026, 6, 17))
+        b = get_daily_budget(user_id=895655, for_date=today)
     finally:
         for p in patches:
             p.stop()
@@ -130,11 +133,12 @@ def test_get_daily_budget_boosts_target_on_heavy_day():
 
 
 def test_get_daily_budget_keeps_avg_when_today_lower():
+    today = datetime.now(timezone.utc).date()
     patches = _patched_budget(today_tdee=1796)
     for p in patches:
         p.start()
     try:
-        b = get_daily_budget(user_id=895655, for_date=date(2026, 6, 17))
+        b = get_daily_budget(user_id=895655, for_date=today)
     finally:
         for p in patches:
             p.stop()

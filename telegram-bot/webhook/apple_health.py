@@ -53,23 +53,57 @@ from webhook.tg_auth import get_tg_user, verify_telegram_init_data  # noqa: F401
 # ── Auth ──────────────────────────────────────────────────────────────────────
 
 
-def verify_token(authorization: str = Header(...)):
+def _resolve_apple_bmr(existing_row, basal_energy_kcal):
+    """Значение для записи в bmr_calories из Apple-источника (#329).
+
+    `basal_energy_kcal` (Apple RMR) — накопительный внутридневной счётчик:
+    free-путь (iOS Shortcuts) шлёт «сегодня на текущий момент» при каждом
+    открытии Telegram, поэтому утренний запуск несёт частичное значение.
+    `create_or_update_activity(monotonic=True)` держит per-day максимум, поэтому
+    достаточно отдавать basal на каждом вызове — CRUD сам дорастит его до полного
+    дневного значения (регрессию от частичного повторного синка гасит там же).
+
+    Исключение: если BMR уже проставлен Garmin-синком — не трогаем (Garmin > Apple),
+    возвращаем None, чтобы CRUD оставил bmr_calories как есть. Строка считается
+    Garmin-овой по `source` её создателя (update-путь CRUD не меняет source).
+    """
+    if basal_energy_kcal is None:
+        return None
+    if (
+        existing_row is not None
+        and existing_row.bmr_calories is not None
+        and (existing_row.source or "").startswith("garmin")
+    ):
+        return None
+    return basal_energy_kcal
+
+
+def verify_token(authorization: Optional[str] = Header(None), token: Optional[str] = None):
     """Bearer token auth.
+
+    Принимает токен либо заголовком `Authorization: Bearer <token>`, либо
+    query-параметром `?token=<token>` — некоторые Android-приложения
+    (напр. health-connect-webhook APK) не дают настроить кастомные заголовки.
 
     Returns the raw token string so the endpoint can resolve which user sent the data.
     """
-    if not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Missing Bearer token")
-    token = authorization.removeprefix("Bearer ").strip()
-    if not token:
+    if authorization:
+        if not authorization.startswith("Bearer "):
+            raise HTTPException(status_code=401, detail="Missing Bearer token")
+        resolved = authorization.removeprefix("Bearer ").strip()
+    elif token:
+        resolved = token.strip()
+    else:
+        raise HTTPException(status_code=401, detail="Missing Bearer token or token query param")
+    if not resolved:
         raise HTTPException(status_code=403, detail="Invalid token")
     # Accept either the global APPLE_HEALTH_TOKEN (backward compat / single-user)
     # OR any per-user token stored in users.health_token (multi-user).
     # Actual user resolution happens in the endpoint after DB lookup.
-    if APPLE_HEALTH_TOKEN and token == APPLE_HEALTH_TOKEN:
-        return token  # global token — will resolve to _target_user_id
+    if APPLE_HEALTH_TOKEN and resolved == APPLE_HEALTH_TOKEN:
+        return resolved  # global token — will resolve to _target_user_id
     # Per-user tokens are validated inside the endpoint against the DB.
-    return token
+    return resolved
 
 
 # ── Request schema ────────────────────────────────────────────────────────────
@@ -301,6 +335,9 @@ async def receive_apple_health(
                 raw["respiratory_rate"] = payload.respiratory_rate
             if payload.wrist_temperature is not None:
                 raw["wrist_temperature"] = payload.wrist_temperature
+            # #328: spo2 хранится только в raw_data (как в v2) — раньше v1 терял его.
+            if payload.spo2_pct is not None:
+                raw["spo2_pct"] = payload.spo2_pct
 
             # NOTE: do NOT pass active_calories — Apple Health's "active energy" is
             # computed differently than Garmin's and breaks the (total = bmr + active)
@@ -312,17 +349,9 @@ async def receive_apple_health(
             if payload.basal_energy_kcal is not None:
                 raw = raw or {}
                 raw["apple_basal_energy_kcal"] = payload.basal_energy_kcal
-            # BMR (basal): write to bmr_calories ONLY if not yet set (Garmin > Apple priority).
-            # If Garmin already populated this row, do not overwrite.
+            # BMR (basal): max-за-день для Apple, но Garmin-BMR не трогаем (#329).
             existing_row = get_activity_by_date(db, target_user_id, record_date)
-            apple_bmr_for_db = (
-                payload.basal_energy_kcal
-                if (
-                    payload.basal_energy_kcal is not None
-                    and (existing_row is None or existing_row.bmr_calories is None)
-                )
-                else None
-            )
+            apple_bmr_for_db = _resolve_apple_bmr(existing_row, payload.basal_energy_kcal)
             activity = create_or_update_activity(
                 db=db,
                 user_id=target_user_id,
@@ -435,7 +464,18 @@ def _hae_pick(rec: dict, *keys, default=None):
 
 
 def _hae_to_daily_payloads(metrics: list[dict]) -> dict[str, AppleHealthPayload]:
-    """Сгруппировать HAE metrics → {YYYY-MM-DD: AppleHealthPayload}."""
+    """Сгруппировать HAE metrics → {YYYY-MM-DD: AppleHealthPayload}.
+
+    Кумулятивные метрики (шаги, дистанция, этажи, энергия) СУММИРУЮТСЯ по дню:
+    HAE присылает день одной записью только при «Суммировать: ON» + группировке
+    «День». Если настройка сбита (или экспорт идёт интервалами), за день приходит
+    несколько записей — раньше каждая следующая перезатирала предыдущую, и в БД
+    оседал последний огрызок интервала: реальные ~6000 шагов превращались в 3–6
+    (зафиксировано на данных 11–12.08.2026).
+
+    Метрики-состояния (пульс, ВСР, вес) не кумулятивны — для них перезапись
+    последним значением остаётся верной, суммировать их нельзя.
+    """
     by_date: dict[str, dict] = {}
 
     for m in metrics:
@@ -448,16 +488,18 @@ def _hae_to_daily_payloads(metrics: list[dict]) -> dict[str, AppleHealthPayload]
             slot = by_date.setdefault(d, {"date": d})
 
             if name == "step_count":
-                slot["steps"] = int(_hae_pick(rec, "qty", "Avg", default=0))
+                slot["steps"] = int(slot.get("steps") or 0) + int(_hae_pick(rec, "qty", "Avg", default=0))
             elif name in ("walking_running_distance", "walking_distance", "distance_walking_running"):
                 qty = float(_hae_pick(rec, "qty", "Avg", default=0))
                 if units == "m":
                     qty /= 1000
                 elif units == "mi":
                     qty *= 1.60934
-                slot["distance_walking_km"] = round(qty, 3)
+                slot["distance_walking_km"] = round(float(slot.get("distance_walking_km") or 0) + qty, 3)
             elif name == "flights_climbed":
-                slot["flights_climbed"] = int(_hae_pick(rec, "qty", "Avg", default=0))
+                slot["flights_climbed"] = int(slot.get("flights_climbed") or 0) + int(
+                    _hae_pick(rec, "qty", "Avg", default=0)
+                )
             elif name in ("active_energy", "active_energy_burned"):
                 qty = float(_hae_pick(rec, "qty", "Avg", default=0))
                 # HAE баг: шлёт МДж (MJ), но пишет units="kJ".
@@ -467,7 +509,7 @@ def _hae_to_daily_payloads(metrics: list[dict]) -> dict[str, AppleHealthPayload]
                     qty = round(qty * 239.006, 1)  # MJ → kcal
                 elif units == "kj":
                     qty = round(qty / 4.184, 1)  # kJ → kcal
-                slot["active_energy_kcal"] = qty
+                slot["active_energy_kcal"] = round(float(slot.get("active_energy_kcal") or 0) + qty, 1)
             elif name in ("basal_energy_burned", "resting_energy"):
                 qty = float(_hae_pick(rec, "qty", "Avg", default=0))
                 # HAE баг: шлёт МДж (MJ), но пишет units="kJ".
@@ -477,7 +519,7 @@ def _hae_to_daily_payloads(metrics: list[dict]) -> dict[str, AppleHealthPayload]
                     qty = round(qty * 239.006, 1)  # MJ → kcal
                 elif units == "kj":
                     qty = round(qty / 4.184, 1)  # kJ → kcal
-                slot["basal_energy_kcal"] = qty
+                slot["basal_energy_kcal"] = round(float(slot.get("basal_energy_kcal") or 0) + qty, 1)
             elif name == "heart_rate":
                 if "Avg" in rec and rec["Avg"] is not None:
                     slot["heart_rate_avg"] = int(round(float(rec["Avg"])))
@@ -850,16 +892,9 @@ async def receive_apple_health_v2(
             if payload.basal_energy_kcal is not None:
                 raw_extra = raw_extra or {}
                 raw_extra["apple_basal_energy_kcal"] = payload.basal_energy_kcal
-            # Apple's basal → bmr_calories ONLY if Garmin hasn't populated it (Garmin > Apple).
+            # Apple's basal → bmr_calories: max-за-день, но Garmin приоритетнее (#329).
             existing_row_v2 = get_activity_by_date(db, target_user_id, record_date)
-            apple_bmr_v2 = (
-                payload.basal_energy_kcal
-                if (
-                    payload.basal_energy_kcal is not None
-                    and (existing_row_v2 is None or existing_row_v2.bmr_calories is None)
-                )
-                else None
-            )
+            apple_bmr_v2 = _resolve_apple_bmr(existing_row_v2, payload.basal_energy_kcal)
             create_or_update_activity(
                 db=db,
                 user_id=target_user_id,
@@ -1109,6 +1144,14 @@ app.include_router(report_router)
 from webhook.profile_api import router as profile_router
 
 app.include_router(profile_router)
+
+from webhook.feedback_api import router as feedback_router
+
+app.include_router(feedback_router)
+
+from webhook.doctor_report_api import router as doctor_report_router
+
+app.include_router(doctor_report_router)
 
 from webhook.agent_tools_api import router as agent_tools_router
 

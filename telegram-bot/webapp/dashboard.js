@@ -62,3 +62,38 @@ function dashboardEmptyState(msg) {
     <div class="hint">${msg}</div>
   </div>`;
 }
+
+// ── «Экспорт для врача» — PDF-отчёт в чат (#290) ─────────────────────────────
+// Живёт во вкладке «Настройки» → группа «Ссылки», рядом с HTML-отчётом /report
+// (#4/#5: убрано из дашборда — вкладка «Дашборд» это iframe /mc/, тот же
+// шаренный врачу дашборд, туда кнопку класть нельзя). Тап по строке раскрывает
+// инлайн-выбор языка (RU/EN, #300) → POST /api/doctor_report → бот шлёт PDF.
+
+// Тап по строке «Экспорт для врача» раскрывает/сворачивает инлайн-выбор языка.
+// Обе кнопки языка равнозначны (одинаковое оформление, без подсветки дефолта).
+function toggleDoctorLang() {
+  const choice = document.getElementById('doctor-lang-choice');
+  const statusEl = document.getElementById('doctor-export-status');
+  if (!choice) return;
+  const opening = choice.hidden;
+  choice.hidden = !opening;
+  if (opening && statusEl) {
+    statusEl.textContent = '';
+    statusEl.className = 'doctor-export-status';
+  }
+}
+
+async function requestDoctorReport(language) {
+  const choice = document.getElementById('doctor-lang-choice');
+  const statusEl = document.getElementById('doctor-export-status');
+  // Свернуть инлайн-выбор.
+  if (choice) choice.hidden = true;
+  if (statusEl) { statusEl.textContent = 'Готовим PDF…'; statusEl.className = 'doctor-export-status'; }
+  try {
+    await window.API.requestDoctorReport(language);
+    if (statusEl) { statusEl.textContent = '✓ PDF отправлен в чат'; statusEl.className = 'doctor-export-status ok'; }
+  } catch (e) {
+    console.error('requestDoctorReport failed', e);
+    if (statusEl) { statusEl.textContent = '⚠ Не удалось сформировать. Попробуйте позже.'; statusEl.className = 'doctor-export-status error'; }
+  }
+}

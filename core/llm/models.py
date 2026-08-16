@@ -68,11 +68,50 @@ class TotalNutrition(BaseModel):
             return 0.0
 
 
+class ProductLabel(BaseModel):
+    """Данные этикетки упакованного продукта (#255).
+
+    LLM заполняет, когда на фото/в тексте есть таблица пищевой ценности
+    конкретного продукта. Идёт в предложение «Запомнить продукт?» →
+    справочник verified_products. Все значения per 100g.
+    """
+
+    name: str = ""
+    brand: Optional[str] = None
+    barcode: Optional[str] = None
+    calories_per_100g: Optional[float] = None
+    protein_per_100g: Optional[float] = None
+    fats_per_100g: Optional[float] = None
+    carbs_per_100g: Optional[float] = None
+    fiber_per_100g: Optional[float] = None
+    portion_g: Optional[float] = None
+
+    @field_validator(
+        "calories_per_100g",
+        "protein_per_100g",
+        "fats_per_100g",
+        "carbs_per_100g",
+        "fiber_per_100g",
+        "portion_g",
+        mode="before",
+    )
+    @classmethod
+    def coerce_numeric(cls, v: Any) -> Optional[float]:
+        if v is None or v == "" or v == "null":
+            return None
+        try:
+            val = float(v)
+            return val if val >= 0 else None
+        except (ValueError, TypeError):
+            return None
+
+
 class FoodData(BaseModel):
     dish_name: str = ""
     meal_type: str = "snack"
     items: List[FoodItem] = Field(default_factory=list)
     total_nutrition: Optional[TotalNutrition] = None
+    product_label: Optional[ProductLabel] = None
 
 
 class FoodResponse(BaseModel):

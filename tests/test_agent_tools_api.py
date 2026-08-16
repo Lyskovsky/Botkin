@@ -87,6 +87,9 @@ def _make_mock_user(health_token="hvt_old_token"):
     user.height_cm = 178
     user.birth_date = None
     user.share_token = "testtoken123abc456def789ghi0"
+    # Явный дефолт: у MagicMock любой атрибут «истинный», а meal_context читает
+    # onboarding_data как dict (#340) — без этого тесты падают на .get().
+    user.onboarding_data = {}
     return user
 
 
@@ -883,6 +886,68 @@ def test_recent_supplements_scoped_to_user(client, db_session, monkeypatch):
     assert captured.get("uid") == 895655
 
 
+class TestSupplementDailyLog:
+    """GET /supplement_daily_log — per-day taken-dates for correlation joins."""
+
+    def _add(self, db, name, d, dosage=None, t=time(9, 0), uid=895655):
+        db.add(SupplementLog(user_id=uid, date=d, time=t, supplement_name=name, dosage=dosage))
+
+    def test_taken_dates_and_adherence(self, client, db_session):
+        today = datetime.now(MSK).date()
+        # магний: 3 разных дня (сегодня два приёма — схлопываются в одну дату)
+        self._add(db_session, "магний", today, dosage="350мг", t=time(9, 0))
+        self._add(db_session, "магний", today, dosage="400мг", t=time(21, 0))  # позже → last_dosage
+        self._add(db_session, "магний", today - timedelta(days=2), dosage="300мг")
+        self._add(db_session, "магний", today - timedelta(days=5))
+        db_session.commit()
+
+        r = client.get("/api/agent/supplement_daily_log?days=30")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["status"] == "ok"
+        assert body["period_days"] == 30
+        assert body["end_date"] == today.isoformat()
+        assert body["start_date"] == (today - timedelta(days=29)).isoformat()
+
+        mg = next(s for s in body["supplements"] if s["supplement"] == "магний")
+        assert mg["days_taken"] == 3  # два приёма сегодня = одна дата
+        assert mg["taken_dates"] == [
+            (today - timedelta(days=5)).isoformat(),
+            (today - timedelta(days=2)).isoformat(),
+            today.isoformat(),
+        ]
+        assert mg["adherence_pct"] == round(100 * 3 / 30, 1)
+        assert mg["last_dosage"] == "400мг"  # последний по (date, time)
+
+    def test_scoped_to_user(self, client, db_session):
+        today = datetime.now(MSK).date()
+        self._add(db_session, "магний", today, uid=895655)
+        self._add(db_session, "чужое", today, uid=999999)  # другой юзер — не должен просочиться
+        db_session.commit()
+        body = client.get("/api/agent/supplement_daily_log?days=30").json()
+        assert {s["supplement"] for s in body["supplements"]} == {"магний"}
+
+    def test_filter_by_name_case_insensitive(self, client, db_session):
+        today = datetime.now(MSK).date()
+        self._add(db_session, "Магний", today)
+        self._add(db_session, "Омега 3", today)
+        db_session.commit()
+        body = client.get("/api/agent/supplement_daily_log?days=30&supplement=магний").json()
+        assert {s["supplement"] for s in body["supplements"]} == {"Магний"}
+
+    def test_window_excludes_old(self, client, db_session):
+        today = datetime.now(MSK).date()
+        self._add(db_session, "магний", today - timedelta(days=40))  # вне окна 30д
+        db_session.commit()
+        body = client.get("/api/agent/supplement_daily_log?days=30").json()
+        assert body["supplements"] == []
+
+    def test_empty(self, client, db_session):
+        body = client.get("/api/agent/supplement_daily_log?days=30").json()
+        assert body["status"] == "ok"
+        assert body["supplements"] == []
+
+
 class TestLatestBiomarkers:
     """GET /latest_biomarkers — per-marker aggregated view with staleness."""
 
@@ -932,3 +997,163 @@ class TestLatestBiomarkers:
         assert data["stale_count"] >= 1
         stale = [e for e in data["biomarkers"].values() if e["is_stale"]]
         assert stale and all(e["stale_label"] for e in stale)
+
+
+# ── #188: agent-tool flag_for_devs — единый инбокс обратной связи ────────────
+
+
+def test_flag_for_devs_writes_feedback(client, db_session):
+    """POST /flag_for_devs пишет строку в user_feedback и возвращает её kind."""
+    from database.models import UserFeedback
+
+    r = client.post(
+        "/api/agent/flag_for_devs",
+        json={
+            "category": "feature",
+            "user_msg": "хочу графики сна",
+            "agent_note": "нет тула",
+        },
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == "ok"
+    assert body["kind"] == "feature"
+
+    rows = db_session.query(UserFeedback).filter_by(user_id=895655).all()
+    assert len(rows) == 1
+    assert rows[0].text == "хочу графики сна"
+    assert rows[0].source == "agent"
+    assert rows[0].kind == "feature"
+
+
+def test_flag_for_devs_respects_opt_out(client, db_session):
+    """POST /flag_for_devs для opted-out пользователя не пишет запись — status=skipped_opt_out."""
+    from database.models import UserSettings
+
+    db_session.add(UserSettings(user_id=895655, feedback_opt_out=True))
+    db_session.commit()
+
+    r = client.post(
+        "/api/agent/flag_for_devs",
+        json={
+            "category": "bug",
+            "user_msg": "не работает кнопка",
+        },
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == "skipped_opt_out"
+
+
+# ── /meal_context: источники ограничений (#340) ───────────────────────────────
+
+
+@pytest.fixture
+def no_kb(monkeypatch):
+    """У пользователя нет KB-файла — как у самозарегистрированного юзера."""
+    from webhook import agent_tools_api
+
+    monkeypatch.setattr(agent_tools_api, "_resolve_user_kb_path", lambda user: (None, "none"))
+
+
+def test_meal_context_falls_back_to_onboarding(client, no_kb):
+    """Без KB диагнозы и аллергии берутся из users.onboarding_data."""
+    mock_user = _current_mock_user(client)
+    mock_user.onboarding_data = {
+        "chronic_conditions": ["Гипотиреоз (E03.9)"],
+        "allergies": ["пыльца"],
+    }
+
+    body = client.get("/api/agent/meal_context").json()
+
+    assert body["constraints"] == ["Гипотиреоз (E03.9)"]
+    assert body["constraints_source"] == "onboarding"
+    assert body["allergies"] == ["пыльца"]
+
+
+def test_meal_context_kb_wins_over_onboarding(client, monkeypatch, tmp_path):
+    """KB — приоритетный источник: онбординг не перебивает файл."""
+    from webhook import agent_tools_api
+
+    kb_file = tmp_path / "kb_895655.json"
+    kb_file.write_text('{"chronic_diagnoses": ["Демпинг-синдром"]}', encoding="utf-8")
+    monkeypatch.setattr(agent_tools_api, "_resolve_user_kb_path", lambda user: (kb_file, "test"))
+
+    mock_user = _current_mock_user(client)
+    mock_user.onboarding_data = {"chronic_conditions": ["Гипотиреоз"]}
+
+    body = client.get("/api/agent/meal_context").json()
+
+    assert body["constraints"] == ["Демпинг-синдром"]
+    assert body["constraints_source"] == "kb"
+
+
+def test_meal_context_no_data_reports_none(client, no_kb):
+    """Ни KB, ни онбординга — пустой список и source=none (не выдумывать)."""
+    _current_mock_user(client).onboarding_data = {}
+
+    body = client.get("/api/agent/meal_context").json()
+
+    assert body["constraints"] == []
+    assert body["constraints_source"] == "none"
+    assert body["allergies"] == []
+
+
+def test_meal_context_splits_freetext_conditions(client, no_kb):
+    """Свободный текст из онбординга режется на пункты общим сплиттером."""
+    _current_mock_user(client).onboarding_data = {"chronic_conditions": "Гипотиреоз. Принимаю Эутирокс"}
+
+    body = client.get("/api/agent/meal_context").json()
+
+    assert body["constraints"] == ["Гипотиреоз", "Принимаю Эутирокс"]
+    assert body["constraints_source"] == "onboarding"
+
+
+# ── /save_health_profile: мягкий сбор медпрофиля (#340) ───────────────────────
+
+
+def test_save_health_profile_writes_and_sets_flag(client, db_session):
+    """Диагнозы и аллергии со слов пациента ложатся в onboarding_data + флаг."""
+    r = client.post(
+        "/api/agent/save_health_profile",
+        json={"chronic_conditions": ["Гипотиреоз, принимаю Эутирокс 50 мкг"], "allergies": ["пыльца"]},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == "ok"
+    assert body["added"] == {"allergies": 1, "chronic_conditions": 1}
+    assert body["health_profile_asked"] is True
+
+    row = db_session.query(User).filter_by(telegram_id=895655).first()
+    assert row.onboarding_data["chronic_conditions"] == ["Гипотиреоз, принимаю Эутирокс 50 мкг"]
+    assert row.onboarding_data["allergies"] == ["пыльца"]
+    assert row.onboarding_data["health_profile_asked"] is True
+
+
+def test_save_health_profile_deduplicates(client, db_session):
+    """Повторная запись того же пункта не плодит дубли (case-insensitive)."""
+    client.post("/api/agent/save_health_profile", json={"chronic_conditions": ["Астма"]})
+
+    body = client.post("/api/agent/save_health_profile", json={"chronic_conditions": ["астма"]}).json()
+
+    assert body["added"] == {"allergies": 0, "chronic_conditions": 0}
+    row = db_session.query(User).filter_by(telegram_id=895655).first()
+    assert row.onboarding_data["chronic_conditions"] == ["Астма"]
+
+
+def test_save_health_profile_nothing_to_report(client, db_session):
+    """«Нечего сообщить» ничего не пишет в списки, но помечает вопрос заданным."""
+    body = client.post("/api/agent/save_health_profile", json={"nothing_to_report": True}).json()
+
+    assert body["status"] == "ok"
+    assert body["added"] == {}
+    row = db_session.query(User).filter_by(telegram_id=895655).first()
+    assert row.onboarding_data["health_profile_asked"] is True
+    assert "chronic_conditions" not in row.onboarding_data
+
+
+def _current_mock_user(client):
+    """Достать mock-юзера, которым подменён get_agent_user в фикстуре client."""
+    from webhook.jwt_auth import get_agent_user
+
+    return client.app.dependency_overrides[get_agent_user]()

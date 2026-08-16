@@ -1,0 +1,72 @@
+name: Cleanup owner supplements
+
+# Ручной прогон очистки остаточного owner-протокола добавок (#251).
+# Запускается НА сервере: docker exec <бот> python -m scripts.cleanup_owner_supplement_protocol.
+# По умолчанию dry-run (только показать). Прод — только после релиза скрипта в main
+# (иначе модуля нет в прод-образе → упадёт ModuleNotFoundError).
+#
+# ⚠️ workflow_dispatch активен только когда файл на default-ветке (main).
+# После мержа в dev нужен dev→main, иначе кнопки запуска не будет.
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Стенд"
+        type: choice
+        options:
+          - dev
+          - prod
+        default: dev
+      apply:
+        description: "Записать изменения (иначе dry-run)"
+        type: boolean
+        default: false
+
+# Не запускать две очистки одного стенда одновременно; текущую не отменять.
+concurrency:
+  group: cleanup-owner-supplements-${{ inputs.target }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    environment: prod # SSH-секреты там же, где у Sync prod → dev
+    timeout-minutes: 10
+    steps:
+      - name: Setup SSH agent
+        # Пин на commit SHA: action получает SSH-ключ с доступом к серверу —
+        # мутабельный тег можно подменить при компрометации upstream.
+        uses: webfactory/ssh-agent@dc588b651fe13675774614f8e6a936a468676387 # v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Trust host key (pinned)
+        # Пин known_hosts из секрета (не TOFU ssh-keyscan) — защита от MITM.
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "${{ secrets.SSH_KNOWN_HOSTS }}" >> ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Run cleanup on server
+        env:
+          SSH_TARGET: ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}
+          TARGET: ${{ inputs.target }}
+          APPLY: ${{ inputs.apply }}
+        run: |
+          if [ "$TARGET" = "prod" ]; then
+            CONTAINER="healthvault_bot"
+          else
+            CONTAINER="botkin_dev_bot"
+          fi
+          FLAG=""
+          [ "$APPLY" = "true" ] && FLAG="--apply"
+          echo "Стенд=$TARGET · контейнер=$CONTAINER · режим=${FLAG:-dry-run}"
+          # Скрипт уже внутри образа бота (деплой). Дёргаем его модулем; DATABASE_URL
+          # и PYTHONPATH берутся из окружения контейнера.
+          ssh -o ConnectTimeout=10 -o ServerAliveInterval=30 -o ServerAliveCountMax=3 \
+            "$SSH_TARGET" docker exec "$CONTAINER" \
+            python -m scripts.cleanup_owner_supplement_protocol $FLAG

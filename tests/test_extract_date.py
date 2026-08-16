@@ -98,3 +98,30 @@ def test_english_yesterday():
 def test_no_date_passthrough():
     assert extract_date_from_text("Просто текст") == (None, "Просто текст")
     assert extract_date_from_text("Сегодня ужин") == (None, "Сегодня ужин")
+
+
+# --- Эвристика «вечером → вчера» (F-004, 02.07.2026) -------------------------
+
+
+def _tz_with_local_hour(hour: int) -> timezone:
+    """Фиксированный offset-tz, в котором СЕЙЧАС локально ~hour часов."""
+    utc_hour = datetime.now(timezone.utc).hour
+    return timezone(timedelta(hours=(hour - utc_hour) % 24))
+
+
+def test_evening_marker_in_the_morning_means_yesterday():
+    tz = _tz_with_local_hour(8)  # у юзера утро
+    date_str, clean = extract_date_from_text("Я вечером ещё 500 мл кефира выпила", user_tz=tz)
+    assert date_str == (datetime.now(tz) - timedelta(days=1)).strftime("%Y-%m-%d")
+    assert "кефира" in clean
+
+
+def test_evening_marker_in_the_evening_stays_today():
+    tz = _tz_with_local_hour(20)  # у юзера вечер — «вечером» это сегодня
+    assert extract_date_from_text("вечером съел салат", user_tz=tz) == (None, "вечером съел салат")
+
+
+def test_evening_marker_with_segodnya_stays_today():
+    tz = _tz_with_local_hour(8)
+    text = "сегодня вечером буду есть рыбу"
+    assert extract_date_from_text(text, user_tz=tz) == (None, text)

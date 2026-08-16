@@ -129,6 +129,43 @@ async def test_food_llm_response_triggers_menu_flow(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_menu_photo_without_caption_stores_photo_paths(tmp_path):
+    """Regression for #256: handle_menu_photo() must write "photo_paths" (list),
+    not "photo_path" (singular) — otherwise save_meal_to_db() never sees the
+    photo and nutrition_log.photo_paths stays empty for this whole flow."""
+    from handlers.photo import process_photos_list
+    from services.state import state_manager
+
+    state_manager.clear_state("895655")
+
+    msg, processing_msg = _make_message(caption=None)
+    photo = _fake_photo(tmp_path)
+
+    llm_result = {
+        "type": "food",
+        "data": {
+            "dish_name": "Гречка с курицей",
+            "items": [
+                {"name": "Гречка с курицей", "weight": 300, "calories": 350, "protein": 25, "fats": 8, "carbs": 45}
+            ],
+            "total_nutrition": {"calories": 350, "protein": 25, "fats": 8, "carbs": 45},
+        },
+    }
+
+    with (
+        patch(OCR_WEIGHT, return_value=None),
+        patch(LLM_ANALYZE, return_value=llm_result),
+        patch(MENU_PARSER, return_value=None),
+    ):
+        await process_photos_list(msg, [photo])
+
+    st = state_manager.get_state("895655")
+    assert st is not None
+    assert st.data.get("photo_path") is None, "legacy singular key must not be written"
+    assert st.data.get("photo_paths") == [str(photo)]
+
+
+@pytest.mark.asyncio
 async def test_vitamins_photo_shows_confirmation(tmp_path):
     """LLM returns type='vitamins' → confirmation keyboard shown, state saved.
 

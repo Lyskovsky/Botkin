@@ -345,7 +345,11 @@ def test_delete_meal_whole(client, api_db):
 def test_get_favorites(client, api_db):
     from datetime import timedelta
 
-    today = date(2026, 4, 17)
+    # get_recent_product_names использует окно [date.today()-90, date.today()].
+    # Раньше здесь была захардкоженная date(2026, 4, 17) — она «протухла» (вышла
+    # за окно к середине июля 2026) и тест стал падать по времени. Берём today
+    # относительно текущей даты, чтобы seed всегда попадал в окно.
+    today = date.today()
     create_nutrition_log(
         db=api_db,
         user_id=895655,

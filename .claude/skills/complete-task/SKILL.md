@@ -1,6 +1,6 @@
 ---
 name: complete-task
-description: Доводит готовую ветку Botkin до мержа в dev и закрывает issue. Триггеры — «закрой задачу», «заверши задачу», «/complete-task» (частая опечатка «/complete-taks»). Флоу-гейты по порядку: подлить свежий dev; создать DRAFT PR в dev с «Closes #N»; code-review (python-review) и фикс MEDIUM+; архитектурная проверка; security-review; тесты (план → апрув → реализация → покрытие); финальный прогон проверок; снять draft; мерж --merge после «да»; статус Done; удалить worktree. Прод НЕ деплоит. Парный к prepare-task.
+description: Доводит готовую ветку Botkin до мержа в dev и закрывает issue. Триггеры — «закрой задачу», «заверши задачу», «/complete-task» (частая опечатка «/complete-taks»). Флоу-гейты по порядку: подлить свежий dev; создать DRAFT PR в dev с «Closes #N»; code-review (python-review) и фикс MEDIUM+; архитектурная проверка; security-review; тесты (план → апрув → реализация → покрытие); финальный прогон проверок; снять draft; мерж --merge после «да»; статус Done; удалить worktree; опц. спросить про PR dev→main с ревьюером @Lyskovsky. Прод НЕ деплоит. Парный к prepare-task.
 ---
 
 # complete-task — довести ветку до мержа и закрыть задачу
@@ -75,6 +75,33 @@ gh pr merge --merge --delete-branch <PR>
 git worktree remove .claude/worktrees/<slug>
 ```
 Без `--force`. При «modified/untracked» в worktree → **СТОП** (разобраться, не сносить вслепую). Подтвердить одной строкой.
+
+### 11. Опц. PR dev → main (сигнал Александру)
+
+После удаления worktree — **всегда спросить**:
+
+> «Ветка в `dev`, задача закрыта. Готово к проду? Открыть PR `dev → main` с ревьюером @Lyskovsky?»
+
+Если **да**:
+```bash
+gh pr create \
+  --base main \
+  --head dev \
+  --reviewer Lyskovsky \
+  --title "chore: sync dev → main (после #<N>)" \
+  --body "## Что включено
+Задача #<N> и всё накопленное в dev с последнего релиза.
+
+## Проверено на @botkin_dev_bot
+✅
+
+## Деплой
+Александр запускает «Deploy prod» с branch=main после мержа."
+```
+
+GitHub пришлёт уведомление @Lyskovsky. Больше ничего не делать — деплой за ним.
+
+Если **нет** — завершить без PR. Пользователь откроет его позже или попросит Claude.
 
 ---
 

@@ -1,5 +1,5 @@
 import pytest
-from datetime import date, time
+from datetime import date, time, timedelta
 
 from database.crud import (
     create_nutrition_log,
@@ -113,8 +113,12 @@ def test_find_meal_for_slot_none_if_missing(test_db, sample_meal):
 
 
 def test_get_recent_product_names_aggregates(test_db):
-    d1 = date(2026, 4, 10)
-    d2 = date(2026, 4, 17)
+    # Даты ОТНОСИТЕЛЬНО сегодня: тест берёт продукты за lookback_days=90 (см. ниже).
+    # Раньше были захардкожены (2026-04-10/17) и «протухли» 16.07.2026, когда выпали
+    # из 90-дневного окна → пустой результат. Держим внутри окна относительно date.today().
+    today = date.today()
+    d1 = today - timedelta(days=14)
+    d2 = today - timedelta(days=7)
     create_nutrition_log(
         test_db,
         user_id=895655,

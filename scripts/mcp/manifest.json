@@ -1,0 +1,40 @@
+{
+  "manifest_version": "0.3",
+  "name": "botkin-connector",
+  "display_name": "Botkin",
+  "version": "0.1.0",
+  "description": "Доступ Claude Desktop к данным здоровья из Botkin (питание, вес, биомаркеры, давление, тренировки) через личный токен.",
+  "long_description": "Коннектор отдаёт Claude Desktop данные с сервера Botkin по личному токену (PAT), который пользователь выпускает в боте командой /connect_mcp. Токен только-для-чтения (ro) можно отдать врачу. Локальные файлы (КПТ-дневник, сканы анализов) этот коннектор не читает — для них используйте встроенный в Claude Desktop коннектор файловой системы.",
+  "author": {
+    "name": "Botkin",
+    "url": "https://botkin.health"
+  },
+  "server": {
+    "type": "python",
+    "entry_point": "botkin_pat_mcp.py",
+    "mcp_config": {
+      "command": "python",
+      "args": ["${__dirname}/botkin_pat_mcp.py"],
+      "env": {
+        "BOTKIN_PAT": "${user_config.pat}",
+        "BOTKIN_API_BASE": "${user_config.base_url}"
+      }
+    }
+  },
+  "user_config": {
+    "pat": {
+      "type": "string",
+      "title": "Токен Botkin",
+      "description": "Личный токен из бота Botkin — команда /connect_mcp. Хранится в системном keychain.",
+      "sensitive": true,
+      "required": true
+    },
+    "base_url": {
+      "type": "string",
+      "title": "Сервер API",
+      "description": "Адрес API Botkin. Менять не нужно, кроме дев-стенда.",
+      "default": "https://health.orangegate.cc",
+      "required": false
+    }
+  }
+}

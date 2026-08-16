@@ -30,6 +30,10 @@ import sys
 from pathlib import Path
 from typing import Iterable
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from core.health.kb_schema import looks_like_us_units  # noqa: E402
+
 # SSH-tunnel out, write directly into Postgres via subprocess psql. Keeps deps
 # minimal — no psycopg2 needed locally. The script runs on Mac, ships rows to
 # Hetzner over SSH by key (same transport as sync_family_kb.py).
@@ -94,9 +98,12 @@ def _extract_rows(kb: dict, user_id: int) -> Iterable[dict]:
 
             # US-панели (g/dL·mg/dL, напр. Maccabi) несут признак единиц в JSONB,
             # чтобы to_canonical сконвертировал в метрику на чтении (issue #95).
-            # Метрические записи (без поля units) остаются как есть.
+            # Часть maccabi-панелей задаёт единицы инлайновыми _ref-диапазонами, а поля
+            # units не имеет — детектим их по величине маркера-индикатора (issue #295).
+            # Метрические записи остаются как есть.
             units = (entry.get("units") or "").lower()
-            if values_dict and ("mg/dl" in units or "g/dl" in units or "us" in units):
+            explicit_us = "mg/dl" in units or "g/dl" in units or "us" in units
+            if values_dict and (explicit_us or looks_like_us_units(values_dict)):
                 values_dict = {**values_dict, "_unit_system": "US"}
 
             yield {

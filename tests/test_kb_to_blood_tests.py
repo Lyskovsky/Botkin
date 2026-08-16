@@ -60,3 +60,25 @@ def test_extracted_us_row_canonizes_to_metric():
     canon, _ = to_canonical(rows[0]["values"])
     assert abs(canon["albumin_g_l"] - 51.0) < 1e-6
     assert canon["ALP"] == 55
+
+
+def test_units_less_gdl_panel_detected_as_us():
+    # maccabi CBC: единицы заданы инлайновыми _ref, поля units нет; hemoglobin в g/dL (#295).
+    kb = {
+        "blood_tests": [
+            {
+                "date": "2026-06-09",
+                "lab": "maccabi",
+                "values": {"hemoglobin": 15.5, "hemoglobin_ref": "13.5-18", "MCHC": 35.1, "hematocrit": 44.1},
+            }
+        ]
+    }
+    rows = list(mod._extract_rows(kb, 42))
+    assert rows[0]["values"]["_unit_system"] == "US"
+
+
+def test_metric_cbc_not_flagged_us():
+    # Метрический CBC (Hb 3-значный г/л, без units) — не помечаем.
+    kb = {"blood_tests": [{"date": "2026-06-09", "values": {"hemoglobin": 155, "hematocrit": 44}}]}
+    rows = list(mod._extract_rows(kb, 42))
+    assert "_unit_system" not in rows[0]["values"]

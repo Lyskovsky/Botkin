@@ -2,10 +2,13 @@
 Калькуляторы кардиоваскулярного риска для дашборда:
   - SCORE2 (ESC 2021) — 10-летний риск ССЗ для Европы
   - ASCVD Lifetime Risk (AHA/ACC) — пожизненный риск
-  - Body Composition trends — динамика веса/жира/мышц
 
 Все функции мульти-юзерные: принимают параметры, не делают I/O.
 Если данных не хватает — возвращают None / структуру с явным "missing".
+
+Публичный интерфейс — `calc_score2` и `calc_ascvd_lifetime` (возвращают dict,
+который читает dashboard_generator). Внутренние шаги вынесены в именованные
+`_*`-хелперы: каждый отвечает за один кусок расчёта и тестируем по отдельности.
 
 Источники:
   SCORE2: https://academic.oup.com/eurheartj/article/42/25/2439/6297709
@@ -18,7 +21,6 @@ from __future__ import annotations
 
 import math
 from typing import Optional
-
 
 # ─────────────────────────────────────────────────────────────────────
 #  SCORE2 — 10-year fatal+nonfatal CVD risk
@@ -60,6 +62,64 @@ _SCORE2_HIGH_RISK_FEMALE = {
     "scale2": 0.8851,
 }
 
+# Возрастные пороги категорий ESC: (порог_low, порог_moderate). <50 строже.
+_SCORE2_THRESHOLDS_UNDER_50 = (2.5, 7.5)
+_SCORE2_THRESHOLDS_50_PLUS = (5.0, 10.0)
+
+_SCORE2_CAT_RU = {"low": "низкий", "moderate": "умеренный", "high": "высокий"}
+
+
+def _score2_standardize(age: int, sbp_mmhg: float, tchol_mmolL: float, hdl_mmolL: float, smoking: bool):
+    """Сырые величины → стандартизованные предикторы (как в оригинальной формуле)."""
+    return {
+        "age": (age - 60) / 5,
+        "sbp": (sbp_mmhg - 120) / 20,
+        "tchol": (tchol_mmolL - 6.0) / 1.0,
+        "hdl": (hdl_mmolL - 1.3) / 0.5,
+        "smoke": 1 if smoking else 0,
+    }
+
+
+def _score2_linear_predictor(coef: dict, z: dict) -> float:
+    """Линейный предиктор (бета·предиктор + age-взаимодействия)."""
+    return (
+        coef["age"] * z["age"]
+        + coef["smoking"] * z["smoke"]
+        + coef["sbp"] * z["sbp"]
+        + coef["tchol"] * z["tchol"]
+        + coef["hdl"] * z["hdl"]
+        + coef["smoking_age"] * z["smoke"] * z["age"]
+        + coef["sbp_age"] * z["sbp"] * z["age"]
+        + coef["tchol_age"] * z["tchol"] * z["age"]
+        + coef["hdl_age"] * z["hdl"] * z["age"]
+    )
+
+
+def _score2_calibrate(lp: float, coef: dict) -> float:
+    """Линейный предиктор → откалиброванный 10-летний риск в % (округл. до 0.1)."""
+    raw_risk = 1 - coef["S0"] ** math.exp(lp)
+    cal = 1 - math.exp(-math.exp(coef["scale1"] + coef["scale2"] * math.log(-math.log(1 - raw_risk))))
+    return round(cal * 100, 1)
+
+
+def _score2_category(risk_pct: float, age: int) -> tuple[str, str]:
+    """Категория + цвет по возрастным порогам ESC."""
+    low_thr, mod_thr = _SCORE2_THRESHOLDS_UNDER_50 if age < 50 else _SCORE2_THRESHOLDS_50_PLUS
+    if risk_pct < low_thr:
+        return "low", "g"
+    if risk_pct < mod_thr:
+        return "moderate", "y"
+    return "high", "r"
+
+
+def _score2_interpretation(risk_pct: float, category: str, cat_ru: str) -> str:
+    text = f"10-летний риск инфаркта/инсульта = {risk_pct}%. Категория: {cat_ru}. "
+    if category == "low":
+        return text + "Статины сейчас не показаны, продолжай образ жизни."
+    if category == "moderate":
+        return text + "Если оптимизация образа жизни не снижает ApoB <0.9 / LDL <2.6 — обсудить статины."
+    return text + "Статины показаны. Обсудить с кардиологом."
+
 
 def calc_score2(
     *,
@@ -89,66 +149,17 @@ def calc_score2(
         return None
 
     coef = _SCORE2_HIGH_RISK_MALE if sex == "male" else _SCORE2_HIGH_RISK_FEMALE
-
-    # Стандартизация переменных (как в оригинальной формуле)
-    cage = (age - 60) / 5
-    csbp = (sbp_mmhg - 120) / 20
-    cchol = (tchol_mmolL - 6.0) / 1.0
-    chdl = (hdl_mmolL - 1.3) / 0.5
-    csmoke = 1 if smoking else 0
-
-    lp = (
-        coef["age"] * cage
-        + coef["smoking"] * csmoke
-        + coef["sbp"] * csbp
-        + coef["tchol"] * cchol
-        + coef["hdl"] * chdl
-        + coef["smoking_age"] * csmoke * cage
-        + coef["sbp_age"] * csbp * cage
-        + coef["tchol_age"] * cchol * cage
-        + coef["hdl_age"] * chdl * cage
-    )
-
-    # Базовый риск: 1 - S0^exp(lp)
-    raw_risk = 1 - coef["S0"] ** math.exp(lp)
-    # Калибровка под регион (для high-risk)
-    # Применяем рекалибровочное преобразование SCORE2
-    cal = 1 - math.exp(-math.exp(coef["scale1"] + coef["scale2"] * math.log(-math.log(1 - raw_risk))))
-    risk_pct = round(cal * 100, 1)
-
-    # Возрастная классификация по ESC:
-    #   <50 лет: low <2.5%, mod 2.5-7.5%, high ≥7.5%
-    #   50-69 лет: low <5%, mod 5-10%, high ≥10%
-    if age < 50:
-        if risk_pct < 2.5:
-            category, color = "low", "g"
-        elif risk_pct < 7.5:
-            category, color = "moderate", "y"
-        else:
-            category, color = "high", "r"
-    else:
-        if risk_pct < 5:
-            category, color = "low", "g"
-        elif risk_pct < 10:
-            category, color = "moderate", "y"
-        else:
-            category, color = "high", "r"
-
-    cat_ru = {"low": "низкий", "moderate": "умеренный", "high": "высокий"}[category]
-    interpretation = f"10-летний риск инфаркта/инсульта = {risk_pct}%. Категория: {cat_ru}. "
-    if category == "low":
-        interpretation += "Статины сейчас не показаны, продолжай образ жизни."
-    elif category == "moderate":
-        interpretation += "Если оптимизация образа жизни не снижает ApoB <0.9 / LDL <2.6 — обсудить статины."
-    else:
-        interpretation += "Статины показаны. Обсудить с кардиологом."
+    z = _score2_standardize(age, sbp_mmhg, tchol_mmolL, hdl_mmolL, smoking)
+    risk_pct = _score2_calibrate(_score2_linear_predictor(coef, z), coef)
+    category, color = _score2_category(risk_pct, age)
+    cat_ru = _SCORE2_CAT_RU[category]
 
     return {
         "risk_pct": risk_pct,
         "category": category,
         "category_ru": cat_ru,
         "color": color,
-        "interpretation": interpretation,
+        "interpretation": _score2_interpretation(risk_pct, category, cat_ru),
         "inputs": {
             "age": age,
             "sex": sex,
@@ -164,6 +175,95 @@ def calc_score2(
 # ─────────────────────────────────────────────────────────────────────
 #  ASCVD Lifetime Risk (AHA/ACC)
 # ─────────────────────────────────────────────────────────────────────
+
+_ASCVD_CAT_RU = {"low": "низкий", "moderate": "умеренный", "high": "высокий", "very_high": "очень высокий"}
+
+
+def _ascvd_classify_sbp(sbp: float, on_meds: bool) -> str:
+    if on_meds:
+        return "major"
+    if sbp < 120:
+        return "optimal"
+    if sbp < 140:
+        return "elevated"
+    return "major"
+
+
+def _ascvd_classify_chol(tc: float) -> str:
+    if tc < 4.7:  # <180 mg/dL
+        return "optimal"
+    if tc < 5.2:  # 180-200
+        return "not_optimal"
+    if tc < 6.2:  # 200-239
+        return "elevated"
+    return "major"
+
+
+def _ascvd_classify_hdl(hdl: float, threshold: float) -> str:
+    # HDL: ниже = хуже (обратная шкала)
+    if hdl >= threshold + 0.3:
+        return "optimal"
+    if hdl >= threshold:
+        return "not_optimal"
+    return "major"  # very low HDL = major
+
+
+def _ascvd_base_risk(is_male: bool, n_major: int, n_elevated: int, n_not_optimal: int) -> float:
+    """Базовый пожизненный риск из таблиц Lloyd-Jones JACC 2006 (baseline 50 лет)."""
+    if is_male:
+        if n_major >= 2:
+            return 69.1
+        if n_major == 1:
+            return 50.0
+        if n_elevated >= 1:
+            return 39.6
+        if n_not_optimal >= 1:
+            return 36.4
+        return 5.2
+    if n_major >= 2:
+        return 50.2
+    if n_major == 1:
+        return 39.1
+    if n_elevated >= 1:
+        return 27.5
+    if n_not_optimal >= 1:
+        return 27.6
+    return 8.2
+
+
+def _ascvd_age_adjust(risk_pct: float, age: int) -> float:
+    """Возрастная коррекция базового (50-летнего) риска, округл. до 0.1.
+
+    Порядок elif важен: age>=70 проверяется ДО age>=60, иначе ветка 60+
+    поглощает весь диапазон 60-79. Фикс бага из PR #242 (Igor-Lysk).
+    """
+    if age < 50:
+        risk_pct *= 1.05
+    elif age >= 70:
+        risk_pct *= 0.80
+    elif age >= 60:
+        risk_pct *= 0.92
+    return round(risk_pct, 1)
+
+
+def _ascvd_category(risk_pct: float) -> tuple[str, str]:
+    if risk_pct < 20:
+        return "low", "g"
+    if risk_pct < 40:
+        return "moderate", "y"
+    if risk_pct < 60:
+        return "high", "o"
+    return "very_high", "r"
+
+
+def _ascvd_interpretation(risk_pct: float, category: str, cat_ru: str) -> str:
+    text = (
+        f"Из 100 человек с твоим профилем у {risk_pct:.0f} случится инфаркт или инсульт когда-нибудь до конца жизни. "
+        f"Категория: {cat_ru}. "
+    )
+    if category in ("low", "moderate"):
+        return text + "Профилактика (диета, спорт, оптимизация ApoB) даёт максимум пользы именно сейчас."
+    return text + "Раннее агрессивное вмешательство (статины + изменения образа жизни) сильно снижает этот риск."
 
 
 def calc_ascvd_lifetime(
@@ -188,13 +288,6 @@ def calc_ascvd_lifetime(
       - HDL <1.0 (40 mg/dL) у муж / <1.3 (50) у жен
       - Курение
       - Диабет
-
-    Категории (Lloyd-Jones JACC 2006):
-      Все факторы оптимальны → 5%
-      Не оптимальны но не повышены (≥1 not optimal) → 36% (м) / 27% (ж)
-      ≥1 повышен (но не major) → 50%
-      1 major risk factor → 60% (м) / 40% (ж)
-      ≥2 major risk factors → 70%+ (м) / 50%+ (ж)
     """
     if not all([age, sex, sbp_mmhg, tchol_mmolL, hdl_mmolL]):
         return None
@@ -204,111 +297,29 @@ def calc_ascvd_lifetime(
     is_male = sex == "male"
     hdl_threshold = 1.0 if is_male else 1.3
 
-    # Классификация каждого параметра: "optimal" / "not_optimal" / "elevated" / "major"
-    def _classify_sbp(sbp, on_meds):
-        if on_meds:
-            return "major"
-        if sbp < 120:
-            return "optimal"
-        if sbp < 140:
-            return "elevated"
-        return "major"
-
-    def _classify_chol(tc):
-        if tc < 4.7:  # <180 mg/dL
-            return "optimal"
-        if tc < 5.2:  # 180-200
-            return "not_optimal"
-        if tc < 6.2:  # 200-239
-            return "elevated"
-        return "major"
-
-    def _classify_hdl(hdl, threshold):
-        # HDL: ниже = хуже (обратная шкала)
-        if hdl >= threshold + 0.3:
-            return "optimal"
-        if hdl >= threshold:
-            return "not_optimal"
-        return "major"  # very low HDL = major
-
-    sbp_cat = _classify_sbp(sbp_mmhg, on_bp_meds)
-    chol_cat = _classify_chol(tchol_mmolL)
-    hdl_cat = _classify_hdl(hdl_mmolL, hdl_threshold)
-    smoke_cat = "major" if smoking else "optimal"
-    dm_cat = "major" if diabetes else "optimal"
-
-    cats = [sbp_cat, chol_cat, hdl_cat, smoke_cat, dm_cat]
+    factors = {
+        "sbp": _ascvd_classify_sbp(sbp_mmhg, on_bp_meds),
+        "chol": _ascvd_classify_chol(tchol_mmolL),
+        "hdl": _ascvd_classify_hdl(hdl_mmolL, hdl_threshold),
+        "smoking": "major" if smoking else "optimal",
+        "diabetes": "major" if diabetes else "optimal",
+    }
+    cats = list(factors.values())
     n_major = sum(1 for c in cats if c == "major")
     n_elevated = sum(1 for c in cats if c == "elevated")
     n_not_optimal = sum(1 for c in cats if c in ("not_optimal", "elevated"))
 
-    # Lloyd-Jones JACC 2006 lifetime risk (50yo baseline, ASCVD events to age 95)
-    if is_male:
-        if n_major >= 2:
-            risk_pct = 69.1
-        elif n_major == 1:
-            risk_pct = 50.0
-        elif n_elevated >= 1:
-            risk_pct = 39.6
-        elif n_not_optimal >= 1:
-            risk_pct = 36.4
-        else:
-            risk_pct = 5.2
-    else:
-        if n_major >= 2:
-            risk_pct = 50.2
-        elif n_major == 1:
-            risk_pct = 39.1
-        elif n_elevated >= 1:
-            risk_pct = 27.5
-        elif n_not_optimal >= 1:
-            risk_pct = 27.6
-        else:
-            risk_pct = 8.2
-
-    # Возрастная коррекция: lifetime от 50 — фиксирован; для 30-49 чуть выше, 60-69 чуть ниже
-    if age < 50:
-        risk_pct *= 1.05
-    elif age >= 60:
-        risk_pct *= 0.92
-    elif age >= 70:
-        risk_pct *= 0.80
-    risk_pct = round(risk_pct, 1)
-
-    if risk_pct < 20:
-        category, color = "low", "g"
-    elif risk_pct < 40:
-        category, color = "moderate", "y"
-    elif risk_pct < 60:
-        category, color = "high", "o"
-    else:
-        category, color = "very_high", "r"
-
-    cat_ru = {"low": "низкий", "moderate": "умеренный", "high": "высокий", "very_high": "очень высокий"}[category]
-    interpretation = (
-        f"Из 100 человек с твоим профилем у {risk_pct:.0f} случится инфаркт или инсульт когда-нибудь до конца жизни. "
-        f"Категория: {cat_ru}. "
-    )
-    if category in ("low", "moderate"):
-        interpretation += "Профилактика (диета, спорт, оптимизация ApoB) даёт максимум пользы именно сейчас."
-    else:
-        interpretation += (
-            "Раннее агрессивное вмешательство (статины + изменения образа жизни) сильно снижает этот риск."
-        )
+    risk_pct = _ascvd_age_adjust(_ascvd_base_risk(is_male, n_major, n_elevated, n_not_optimal), age)
+    category, color = _ascvd_category(risk_pct)
+    cat_ru = _ASCVD_CAT_RU[category]
 
     return {
         "risk_pct": risk_pct,
         "category": category,
         "category_ru": cat_ru,
         "color": color,
-        "interpretation": interpretation,
-        "factors": {
-            "sbp": sbp_cat,
-            "chol": chol_cat,
-            "hdl": hdl_cat,
-            "smoking": smoke_cat,
-            "diabetes": dm_cat,
-        },
+        "interpretation": _ascvd_interpretation(risk_pct, category, cat_ru),
+        "factors": factors,
         "n_major": n_major,
         "n_elevated": n_elevated,
         "inputs": {

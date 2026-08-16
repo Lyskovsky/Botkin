@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -29,7 +29,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from sqlalchemy import func  # noqa: E402
 
 from database.models import ActivityLog, GlucoseReading, NutritionLog, Weight  # noqa: E402
-from webhook.jwt_auth import get_agent_user, get_db  # noqa: E402
+from webhook.jwt_auth import get_agent_user, get_db, require_agent_scope  # noqa: E402
+from webhook.rate_limit import SlidingWindowRateLimiter  # noqa: E402
 from core.health.glucose_stats import compute_glucose_stats, glucose_staleness  # noqa: E402
 from core.health.glucose_runtime import refresh_glucose_for_telegram as _refresh_glucose, LoginOnCooldownError  # noqa: E402
 from bot_token import resolve_bot_token  # noqa: E402
@@ -39,6 +40,59 @@ logger = logging.getLogger(__name__)
 
 
 router = APIRouter(prefix="/api/agent", tags=["agent-tools"])
+
+
+# ── PAT → JWT exchange (публичный bootstrap для MCP-коннектора, #228) ──────────
+
+# Лимит на публичный exchange: не больше 10 попыток в минуту с одного IP,
+# чтобы перебор PAT по сети упирался в стену. Состояние в памяти процесса.
+_EXCHANGE_RATE_LIMIT = 10
+_EXCHANGE_RATE_WINDOW_S = 60.0
+_exchange_limiter = SlidingWindowRateLimiter(_EXCHANGE_RATE_LIMIT, _EXCHANGE_RATE_WINDOW_S)
+
+
+class ExchangePATRequest(BaseModel):
+    pat: str = Field(..., min_length=10, max_length=128)
+
+
+@router.post("/exchange_pat_for_jwt")
+async def exchange_pat_for_jwt(
+    body: ExchangePATRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Обменять долгоживущий PAT на короткоживущий агентский JWT.
+
+    Единственный публичный (без JWT) эндпоинт. Коннектор Claude Desktop хранит
+    durable PAT в keychain и дёргает этот метод, чтобы получить JWT для /api/agent/*.
+    JWT наследует scope токена: 'ro'-PAT → 'ro'-JWT (write-эндпоинты вернут 403).
+    """
+    from database.crud import get_active_pat_by_token
+    from database.models import User
+    from core.agent_chat import agent_id_for
+    from webhook.jwt_auth import generate_agent_jwt, JWT_TTL_HOURS
+
+    client_ip = request.headers.get("x-real-ip") or (request.client.host if request.client else "unknown")
+    if not _exchange_limiter.allow(client_ip):
+        raise HTTPException(status_code=429, detail="Слишком много запросов. Попробуйте через минуту.")
+
+    pat = get_active_pat_by_token(db, body.pat)
+    if not pat:
+        raise HTTPException(status_code=401, detail="Недействительный или отозванный токен")
+
+    user = db.query(User).filter_by(telegram_id=pat.user_id).first()
+    if not user or not user.is_active:
+        raise HTTPException(status_code=401, detail="Пользователь не найден или неактивен")
+    if not user.jwt_secret:
+        raise HTTPException(status_code=401, detail="Пользователь не инициализирован (нет jwt_secret)")
+
+    token = generate_agent_jwt(user.telegram_id, agent_id_for(user), user.jwt_secret, scope=pat.scope)
+    return {
+        "access_token": token,
+        "token_type": "Bearer",
+        "expires_in": JWT_TTL_HOURS * 3600,
+        "scope": pat.scope,
+    }
 
 
 # ── Timezone helpers ──────────────────────────────────────────────────────────
@@ -101,6 +155,30 @@ class LogSupplementRequest(BaseModel):
     dosage: Optional[str] = None
     date: Optional[str] = None  # YYYY-MM-DD; defaults to today
     time: Optional[str] = None  # HH:MM
+    force: bool = False  # True — записать даже если та же добавка уже логировалась в этот день
+
+
+class FlagForDevsRequest(BaseModel):
+    category: str  # bug | feature | question
+    user_msg: str
+    agent_note: Optional[str] = None
+
+
+class ListFeedbackRequest(BaseModel):
+    # #269 триаж (admin-only): status=None/'all' → все статусы
+    status: Optional[str] = "new"
+    limit: int = 20
+
+
+class TriageFeedbackRequest(BaseModel):
+    # #269 триаж (admin-only): частичное обновление — передавай только меняемые поля
+    feedback_id: int
+    status: Optional[str] = None  # new/triaged/in_progress/done/wontfix/duplicate
+    priority: Optional[str] = None  # P0-P3
+    github_issue: Optional[str] = None
+    # Фаза 3 (#188): явный текст ответа автору. Перекрывает авто-текст и уходит
+    # пользователю при любом статусе — так `question` закрывается человеческим ответом.
+    notify_text: Optional[str] = Field(None, max_length=3000)
 
 
 class LogBPRequest(BaseModel):
@@ -108,6 +186,37 @@ class LogBPRequest(BaseModel):
     diastolic: int = Field(..., ge=30, le=200, description="Diastolic pressure mmHg")
     pulse: Optional[int] = Field(None, ge=30, le=250, description="Pulse bpm")
     measured_at: Optional[str] = None  # ISO datetime; defaults to now
+
+
+# Границы правдоподобия для measured_at замера с весов. Умных весов с передачей
+# состава тела в 1999 не существовало, а замер «из будущего» — рассинхрон часов
+# клиента (сутки запаса) либо мусор.
+EARLIEST_PLAUSIBLE_MEASUREMENT = datetime(2000, 1, 1, tzinfo=timezone.utc)
+FUTURE_MEASUREMENT_TOLERANCE = timedelta(days=1)
+
+
+class BodyCompositionMeasurement(BaseModel):
+    """Один замер с умных весов. Границы — санити-чек на ошибку единиц измерения."""
+
+    measured_at: str = Field(..., description="ISO datetime замера (реальное время с весов)")
+    weight: float = Field(..., gt=20, le=400, description="Вес, кг")
+    body_fat: Optional[float] = Field(None, ge=0, le=100, description="Жир, %")
+    muscle_mass: Optional[float] = Field(None, ge=0, le=200, description="Мышечная масса, кг")
+    water: Optional[float] = Field(None, ge=0, le=100, description="Вода, %")
+    bone_mass: Optional[float] = Field(None, ge=0, le=50, description="Костная масса, кг")
+    visceral_fat: Optional[float] = Field(None, ge=0, le=60, description="Висцеральный жир (индекс)")
+    bmi: Optional[float] = Field(None, gt=5, le=100, description="ИМТ")
+
+
+class LogBodyCompositionRequest(BaseModel):
+    measurements: list[BodyCompositionMeasurement] = Field(
+        ..., min_length=1, max_length=500, description="Батч замеров (импорт истории — одним запросом)"
+    )
+    source: str = Field(
+        "agent_api",
+        pattern=r"^[a-z0-9_]{1,50}$",
+        description="Канал данных: withings / zepp / hae / agent_api",
+    )
 
 
 class EditMealRequest(BaseModel):
@@ -219,7 +328,7 @@ def _resolve_user_kb_path(user) -> tuple[Optional[Path], str]:
 @router.post("/log_meal_text")
 async def log_meal_text(
     req: LogMealTextRequest,
-    user=Depends(get_agent_user),
+    user=Depends(require_agent_scope("rw")),
     db: Session = Depends(get_db),
 ):
     """Parse free-text meal description and save to nutrition_log.
@@ -292,7 +401,7 @@ async def log_meal_text(
 @router.post("/edit_meal")
 async def edit_meal(
     req: EditMealRequest,
-    user=Depends(get_agent_user),
+    user=Depends(require_agent_scope("rw")),
     db: Session = Depends(get_db),
 ):
     """Изменить уже залогированный приём пищи: перенести на дату (new_date),
@@ -332,7 +441,7 @@ async def edit_meal(
 @router.post("/delete_meal")
 async def delete_meal(
     req: DeleteMealRequest,
-    user=Depends(get_agent_user),
+    user=Depends(require_agent_scope("rw")),
     db: Session = Depends(get_db),
 ):
     """Удалить залогированный приём пищи по meal_id (из recent_meals)."""
@@ -347,14 +456,43 @@ async def delete_meal(
 @router.post("/log_supplement")
 async def log_supplement(
     req: LogSupplementRequest,
-    user=Depends(get_agent_user),
+    user=Depends(require_agent_scope("rw")),
     db: Session = Depends(get_db),
 ):
     """Save a supplement entry to supplements_log."""
+    from sqlalchemy import text as _text
+
     from database.crud import create_supplement_log
 
     record_date = _parse_date(req.date, user)
     sup_time = _parse_time(req.time)
+
+    # Дедуп-guard (F-002, 02.07.2026): та же добавка уже логировалась в этот день →
+    # не пишем молча дубль, а возвращаем warning; агент уточнит у пользователя
+    # и при подтверждении повторит вызов с force=true.
+    if not req.force:
+        existing = db.execute(
+            _text(
+                "SELECT id, time FROM supplements_log "
+                "WHERE user_id = :uid AND date = :d "
+                "AND LOWER(REPLACE(supplement_name, '-', ' ')) = LOWER(REPLACE(:name, '-', ' ')) "
+                "LIMIT 1"
+            ),
+            {"uid": user.telegram_id, "d": record_date, "name": req.supplement_name},
+        ).first()
+        if existing:
+            return {
+                "status": "duplicate_warning",
+                "existing_id": existing.id,
+                "existing_time": str(existing.time) if existing.time else None,
+                "date": record_date.isoformat(),
+                "supplement_name": req.supplement_name,
+                "hint": (
+                    "Эта добавка уже залогирована в этот день. Запись НЕ создана. "
+                    "Спроси пользователя, действительно ли это повторный приём; "
+                    "если да — повтори вызов с force=true."
+                ),
+            }
 
     log = create_supplement_log(
         db=db,
@@ -374,10 +512,182 @@ async def log_supplement(
     }
 
 
+@router.post("/flag_for_devs")
+async def flag_for_devs(
+    req: FlagForDevsRequest,
+    user=Depends(require_agent_scope("rw")),
+    db: Session = Depends(get_db),
+):
+    """Агент флагает пожелание/багрепорт в инбокс user_feedback (#188)."""
+    from database.crud import create_feedback, is_feedback_opted_out
+
+    kind = req.category if req.category in ("bug", "feature", "question") else "unspecified"
+
+    if is_feedback_opted_out(db, user.telegram_id):
+        return {"status": "skipped_opt_out"}
+
+    row = create_feedback(
+        db,
+        user_id=user.telegram_id,
+        text=req.user_msg,
+        source="agent",
+        kind=kind,
+        agent_context={"agent_note": req.agent_note} if req.agent_note else None,
+    )
+    return {"status": "ok", "feedback_id": row.id, "kind": kind}
+
+
+def _feedback_to_dict(row) -> dict:
+    """Плоский структурный вид записи фидбека для агента (#269)."""
+    ctx = row.agent_context if isinstance(row.agent_context, dict) else {}
+    return {
+        "id": row.id,
+        "kind": row.kind,
+        "status": row.status,
+        "priority": row.priority,
+        "source": row.source,
+        "user_id": row.user_id,
+        "text": row.text,
+        "agent_note": ctx.get("agent_note"),
+        "github_issue": row.github_issue,
+        "dedup_of": row.dedup_of,
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+        "resolved_at": row.resolved_at.isoformat() if row.resolved_at else None,
+        "notified_at": row.notified_at.isoformat() if row.notified_at else None,
+    }
+
+
+async def _send_feedback_notification(chat_id: int, text: str) -> bool:
+    """Личное сообщение автору фидбека о разборе обращения (Фаза 3, #188). True при успехе.
+
+    parse_mode НЕ задаём — текст плоский: в нём цитата пользователя, HTML-разметку
+    включать нельзя (символ '<' в обращении иначе сломал бы разметку/инъектнул теги)."""
+    import httpx
+
+    bot_token = resolve_bot_token()
+    if not bot_token:
+        logger.warning("feedback-notify: bot token missing, cannot notify %s", chat_id)
+        return False
+    try:
+        async with httpx.AsyncClient() as http:
+            resp = await http.post(
+                f"https://api.telegram.org/bot{bot_token}/sendMessage",
+                json={"chat_id": chat_id, "text": text},
+                timeout=10.0,
+            )
+        data = resp.json()
+        if not data.get("ok"):
+            logger.warning("feedback-notify sendMessage failed for %s: %s", chat_id, data.get("description"))
+            return False
+        return True
+    except Exception as e:
+        logger.error("feedback-notify exception for %s: %s", chat_id, e, exc_info=True)
+        return False
+
+
+@router.post("/list_feedback")
+async def list_feedback(
+    req: ListFeedbackRequest,
+    user=Depends(require_agent_scope("ro")),
+    db: Session = Depends(get_db),
+):
+    """Список записей инбокса фидбека для триажа (#269). Только для админов."""
+    from config.users import is_admin
+    from database.crud import list_recent_feedback
+
+    if not is_admin(user.telegram_id):
+        raise HTTPException(status_code=403, detail="триаж доступен только администраторам")
+    status = req.status if req.status not in (None, "", "all") else None
+    limit = max(1, min(req.limit, 100))
+    rows = list_recent_feedback(db, status=status, limit=limit)
+    return {"status": "ok", "count": len(rows), "feedback": [_feedback_to_dict(r) for r in rows]}
+
+
+@router.post("/triage_feedback")
+async def triage_feedback(
+    req: TriageFeedbackRequest,
+    user=Depends(require_agent_scope("rw")),
+    db: Session = Depends(get_db),
+):
+    """Триаж записи фидбека: статус/приоритет/GitHub-issue (#269). Только для админов.
+
+    Частичное обновление — применяются только переданные (не-None) поля.
+    Возвращает обновлённую запись, чтобы агент подтвердил результат.
+    """
+    from config.users import is_admin
+    from database.crud import (
+        FEEDBACK_PRIORITIES,
+        FEEDBACK_STATUSES,
+        get_feedback,
+        set_feedback_github,
+        set_feedback_priority,
+        update_feedback_status,
+    )
+
+    if not is_admin(user.telegram_id):
+        raise HTTPException(status_code=403, detail="триаж доступен только администраторам")
+    row = get_feedback(db, req.feedback_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"фидбек #{req.feedback_id} не найден")
+    # #269: провалидировать ВСЕ поля ДО первой мутации — каждый CRUD-хелпер
+    # коммитит отдельно, поэтому иначе невалидный priority после валидного status
+    # оставил бы частичное изменение при ответе 400 (неатомарность).
+    if req.status is not None and req.status not in FEEDBACK_STATUSES:
+        raise HTTPException(status_code=400, detail=f"невалидный статус {req.status!r}")
+    if req.priority is not None and req.priority not in FEEDBACK_PRIORITIES:
+        raise HTTPException(status_code=400, detail=f"невалидный приоритет {req.priority!r}")
+    if req.github_issue and len(req.github_issue) > 64:
+        raise HTTPException(status_code=400, detail="github_issue слишком длинный (макс 64; передавай номер)")
+    try:
+        if req.status is not None:
+            row = update_feedback_status(db, req.feedback_id, req.status)
+        if req.priority is not None:
+            row = set_feedback_priority(db, req.feedback_id, req.priority)
+        if req.github_issue is not None:
+            row = set_feedback_github(db, req.feedback_id, req.github_issue)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    # Фаза 3 (#188): уведомить автора, когда обращение разобрано (done/wontfix) или
+    # когда админ явно ответил (notify_text). Идемпотентность — guard по notified_at:
+    # штампуем ТОЛЬКО после успешной отправки, поэтому сбой сети → повтор на след. триаже,
+    # а второй done по уже уведомлённой записи молча пропускается.
+    from core.feedback_notify import build_notification_text
+    from database.crud import is_feedback_opted_out, mark_feedback_notified
+
+    notified = False
+    notify_skipped: Optional[str] = None
+    msg = build_notification_text(
+        kind=row.kind,
+        status=row.status,
+        text=row.text,
+        custom=req.notify_text,
+    )
+    if msg:
+        if row.notified_at is not None:
+            notify_skipped = "already_notified"
+        elif is_feedback_opted_out(db, row.user_id):
+            # opt-out = никаких исходящих контактов по фидбеку; не шлём и не штампуем.
+            notify_skipped = "opt_out"
+        elif await _send_feedback_notification(row.user_id, msg):
+            mark_feedback_notified(db, row.id)
+            db.refresh(row)
+            notified = True
+        else:
+            notify_skipped = "send_failed"
+
+    return {
+        "status": "ok",
+        "feedback": _feedback_to_dict(row),
+        "notified": notified,
+        "notify_skipped": notify_skipped,
+    }
+
+
 @router.post("/log_bp")
 async def log_bp(
     req: LogBPRequest,
-    user=Depends(get_agent_user),
+    user=Depends(require_agent_scope("rw")),
     db: Session = Depends(get_db),
 ):
     """Save a blood pressure reading to blood_pressure_logs."""
@@ -421,9 +731,110 @@ async def log_bp(
     }
 
 
+@router.post("/log_body_composition")
+async def log_body_composition(
+    req: LogBodyCompositionRequest,
+    user=Depends(require_agent_scope("rw")),
+    db: Session = Depends(get_db),
+):
+    """Записать замеры состава тела с внешних умных весов в `weights`.
+
+    Зачем отдельный канал: в HealthKit нет типов для мышечной массы, воды, костной
+    массы и висцерального жира — через Apple Health / HAE доходят только вес, % жира
+    и безжировая масса. Полный состав приходит либо от Withings/Zepp напрямую, либо
+    исторически заливался с мака владельца через ssh + psql суперюзером
+    (`scripts/import/zepp_csv.py`), что требовало доступа к прод-серверу.
+
+    Этот эндпоинт закрывает ту же задачу по HTTPS с PAT-токеном: `user_id` берётся
+    из токена (не из тела запроса), RLS изолирует данные, доступ к серверу и
+    суперюзер Postgres не нужны.
+
+    Батч атомарен: все таймстампы валидируются до первой записи, поэтому битый замер
+    не оставляет половину истории записанной. Повторный `measured_at` внутри одного
+    батча — не ошибка, применяется последний (см. flush в upsert_device_weight).
+
+    `measured_at` обязан нести часовой пояс — ключ идемпотентности должен означать
+    один и тот же момент независимо от того, как клиент его сериализовал.
+    """
+    from database.crud import MANUAL_WEIGHT_SOURCES, upsert_device_weight
+
+    # Ручные источники дедупятся по календарному дню в upsert_manual_weight (#170).
+    # Если пустить device-замеры под таким source, ручной апсерт потом подменит
+    # реальный замер с весов — каналы должны остаться различимыми.
+    if req.source in MANUAL_WEIGHT_SOURCES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"source={req.source!r} зарезервирован за ручным вводом. Используйте имя канала (withings, zepp, hae).",
+        )
+
+    now = datetime.now(timezone.utc)
+    parsed = []
+    for m in req.measurements:
+        try:
+            measured_at = datetime.fromisoformat(m.measured_at)
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid measured_at: {m.measured_at!r}. Use ISO datetime with UTC offset.",
+            )
+
+        # Требуем явный офсет: эндпоинт нужен для ИДЕМПОТЕНТНОГО импорта, а ключ
+        # идемпотентности — measured_at. Naive-строка на Postgres трактуется по
+        # session TimeZone (нигде не зафиксирован), поэтому один и тот же момент,
+        # присланный то с офсетом то без, дал бы два ряда вместо одного.
+        if measured_at.tzinfo is None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"measured_at={m.measured_at!r} без часового пояса. "
+                    "Укажите офсет явно (например 2026-08-01T07:00:00+03:00 или ...Z)."
+                ),
+            )
+        measured_at = measured_at.astimezone(timezone.utc)
+
+        # Санити-границы: мусорная дата молча перекосила бы агрегаты дашборда и phenoage
+        if measured_at < EARLIEST_PLAUSIBLE_MEASUREMENT or measured_at > now + FUTURE_MEASUREMENT_TOLERANCE:
+            raise HTTPException(
+                status_code=422,
+                detail=f"measured_at={m.measured_at!r} вне правдоподобного диапазона замеров.",
+            )
+
+        parsed.append((measured_at, m))
+
+    inserted = 0
+    updated = 0
+    for measured_at, m in parsed:
+        created = upsert_device_weight(
+            db,
+            user_id=user.telegram_id,
+            measured_at=measured_at,
+            weight=m.weight,
+            body_fat=m.body_fat,
+            muscle_mass=m.muscle_mass,
+            water=m.water,
+            bmi=m.bmi,
+            # Колонка visceral_fat — INTEGER, весы отдают float
+            visceral_fat=round(m.visceral_fat) if m.visceral_fat is not None else None,
+            bone_mass=m.bone_mass,
+            source=req.source,
+        )
+        if created:
+            inserted += 1
+        else:
+            updated += 1
+    db.commit()
+
+    return {
+        "status": "ok",
+        "inserted": inserted,
+        "updated": updated,
+        "source": req.source,
+    }
+
+
 @router.post("/regenerate_health_token")
 async def regenerate_health_token(
-    user=Depends(get_agent_user),
+    user=Depends(require_agent_scope("rw")),
     db: Session = Depends(get_db),
 ):
     """Generate a new health_token for the user and save it to users table."""
@@ -689,6 +1100,11 @@ async def list_kb_keys(user=Depends(get_agent_user)):
     Для каждого ключа отдаём type (list/dict/scalar) и count (длина для
     list/dict), чтобы агент понимал где искать. Служебные ключи `_*`
     и крупные дампы (`apple_health`, `cgm_data`) фильтруются.
+
+    Секция `documents` — файлы, загруженные пользователем через /doc
+    (`handlers/doc_upload.append_document_to_kb`). Числовые лабораторные
+    показатели из них дублируются в Postgres `blood_tests` (#281), поэтому
+    за анализами агент идёт в /recent_biomarkers, а сюда — за самим документом.
     """
     kb_path, source = _resolve_user_kb_path(user)
     if kb_path is None:
@@ -735,7 +1151,7 @@ class AgentCorrectionRequest(BaseModel):
 @router.post("/add_agent_correction")
 async def add_agent_correction(
     req: AgentCorrectionRequest,
-    user=Depends(get_agent_user),
+    user=Depends(require_agent_scope("rw")),
 ):
     """Сохранить поправку или новый факт в секцию agent_corrections KB пользователя.
 
@@ -864,7 +1280,7 @@ class RenderReportRequest(BaseModel):
 @router.post("/render_report")
 async def render_report(
     req: RenderReportRequest,
-    user=Depends(get_agent_user),
+    user=Depends(require_agent_scope("rw")),
 ):
     """Сгенерировать PNG-инфографику и отправить юзеру в Telegram.
 
@@ -950,6 +1366,26 @@ async def render_report(
         "kb_source": kb_path.name,
         "telegram_message_id": result["result"].get("message_id"),
     }
+
+
+@router.post("/doctor_report")
+async def doctor_report(
+    body: dict = Body(default={}),
+    user=Depends(require_agent_scope("rw")),
+    db=Depends(get_db),
+):
+    """Сгенерировать PDF-отчёт для врача (секции IPS) и отправить юзеру в чат.
+
+    Side-effect: шлёт PDF Telegram-документом на user.telegram_id через общий
+    helper send_doctor_report_to_chat (тот же путь, что у кнопки мини-аппа, #290/#291).
+    body.language ('ru'|'en') задаёт язык отчёта (#300); иначе — ru.
+    Агенту возвращаем короткий статус {status, sent} — дальше он отвечает текстом.
+    """
+    from services.doctor_report import send_doctor_report_to_chat
+    from services.report_i18n import resolve_report_language
+
+    lang = resolve_report_language((body or {}).get("language"), None)
+    return send_doctor_report_to_chat(db, user.telegram_id, lang=lang)
 
 
 # ── Универсальный render через QuickChart.io ─────────────────────────────────
@@ -1056,7 +1492,7 @@ def _enrich_chart_spec(chart: dict) -> dict:
 @router.post("/render_chart")
 async def render_chart(
     req: RenderChartRequest,
-    user=Depends(get_agent_user),
+    user=Depends(require_agent_scope("rw")),
 ):
     """Рендерит произвольный график через QuickChart.io и отправляет в Telegram.
 
@@ -1140,10 +1576,14 @@ async def meal_context(
     db: Session = Depends(get_db),
 ):
     """P-002: всё нужное для «что мне съесть сейчас» ОДНИМ вызовом —
-    остаток КБЖУ на сегодня + ограничения (диагнозы) + любимые продукты.
+    остаток КБЖУ на сегодня + ограничения (диагнозы) + аллергии + любимые продукты.
 
     Зачем тул, а не три вызова: гарантирует, что ограничения-диагнозы (подагра,
     демпинг-синдром и т.п.) ВСЕГДА в контексте, и экономит токены/реплики.
+
+    Источники ограничений по приоритету: KB-файл юзера → `users.onboarding_data`
+    (#340; у самозарегистрированного юзера KB нет вовсе). Фактический источник —
+    в поле `constraints_source` ∈ {kb, onboarding, none}.
     """
     import json
 
@@ -1168,6 +1608,7 @@ async def meal_context(
 
     # Ограничения из KB (диагнозы) — чтобы советы были безопасны под состояние.
     constraints = []
+    constraints_source = "none"
     kb_path, _src = _resolve_user_kb_path(user)
     if kb_path:
         try:
@@ -1176,9 +1617,23 @@ async def meal_context(
                 v = kb.get(key)
                 if v:
                     constraints = v if isinstance(v, list) else [v]
+                    constraints_source = "kb"
                     break
         except Exception:
             logger.exception("meal_context: KB read failed")
+
+    # #340: у самозарегистрированного юзера KB-файла нет вовсе — диагнозы лежат
+    # в users.onboarding_data (пишет /doc через merge_onboarding_lists). Без этого
+    # fallback тул отдавал constraints=[] и советы шли как здоровому.
+    # Аллергии для «что съесть» критичнее диагнозов — отдаём отдельным полем.
+    from core.health.onboarding_lists import ALLERGY_KEYS, CONDITION_KEYS, onboarding_list
+
+    onboarding = user.onboarding_data or {}
+    if not constraints:
+        constraints = onboarding_list(onboarding, CONDITION_KEYS)
+        if constraints:
+            constraints_source = "onboarding"
+    allergies = onboarding_list(onboarding, ALLERGY_KEYS)
 
     return {
         "status": "ok",
@@ -1196,6 +1651,8 @@ async def meal_context(
             "fiber": totals.get("fiber"),
         },
         "constraints": constraints,
+        "constraints_source": constraints_source,
+        "allergies": allergies,
         "frequent_products": products[:15],
     }
 
@@ -1539,6 +1996,97 @@ async def recent_supplements(
         "unique_supplements": len(items),
         "total_log_entries": sum(i["total_intakes"] for i in items),
         "items": items,
+    }
+
+
+@router.get("/supplement_daily_log")
+async def supplement_daily_log(
+    days: int = 30,
+    supplement: Optional[str] = None,
+    user=Depends(get_agent_user),
+    db: Session = Depends(get_db),
+):
+    """Per-day supplement intake log for correlation analysis.
+
+    В отличие от /recent_supplements (только агрегаты), возвращает для каждой
+    добавки СПИСОК ДАТ приёма за окно + границы окна — чтобы сопоставлять факт
+    приёма по дням с данными сна/HRV/активности (напр. магний ↔ качество сна).
+
+    supplements_log хранит строку на каждый приём; «не принимал» = отсутствие
+    строки. Отдаём разреженно: taken_dates + [start_date, end_date] полностью
+    определяют taken/not-taken для любого дня без плотной сетки N×дни.
+
+    Параметры:
+      days: окно, 1..180 (дефолт 30).
+      supplement: опц. подстрока имени (регистронезависимо) — один препарат.
+    """
+    from datetime import time as _dtime
+
+    from database.models import SupplementLog
+
+    days = max(1, min(days, 180))
+    # «Сегодня» в tz пользователя — иначе поздние вечерние записи уедут за окно
+    # (та же логика, что в других эндпоинтах агента).
+    tz_name = getattr(user, "timezone", None) or "Europe/Moscow"
+    try:
+        user_tz = ZoneInfo(tz_name)
+    except (ZoneInfoNotFoundError, KeyError):
+        user_tz = ZoneInfo("Europe/Moscow")
+    today = datetime.now(user_tz).date()
+    start_date = today - timedelta(days=days - 1)
+
+    rows = (
+        db.query(
+            SupplementLog.supplement_name,
+            SupplementLog.date,
+            SupplementLog.time,
+            SupplementLog.dosage,
+        )
+        .filter(
+            SupplementLog.user_id == user.telegram_id,
+            SupplementLog.date >= start_date,
+        )
+        .order_by(SupplementLog.supplement_name, SupplementLog.date)
+        .all()
+    )
+
+    name_filter = supplement.strip().lower() if supplement else None
+
+    # Группируем по имени добавки, копим множество дат приёма + последнюю дозу.
+    groups: dict = {}
+    for r in rows:
+        name = r.supplement_name or ""
+        if name_filter and name_filter not in name.lower():
+            continue
+        g = groups.setdefault(name, {"dates": set(), "last_key": None, "last_dosage": None})
+        g["dates"].add(r.date)
+        key = (r.date, r.time or _dtime.min)
+        if g["last_key"] is None or key > g["last_key"]:
+            g["last_key"] = key
+            g["last_dosage"] = r.dosage
+
+    supplements = []
+    for name, g in groups.items():
+        dates_sorted = sorted(g["dates"])
+        supplements.append(
+            {
+                "supplement": name,
+                "days_taken": len(dates_sorted),
+                "adherence_pct": round(100 * len(dates_sorted) / days, 1),
+                "taken_dates": [d.isoformat() for d in dates_sorted],
+                "last_dosage": g["last_dosage"],
+            }
+        )
+    # По убыванию частоты, затем по имени — как в /recent_supplements.
+    supplements.sort(key=lambda s: (-s["days_taken"], s["supplement"]))
+
+    return {
+        "status": "ok",
+        "period_days": days,
+        "start_date": start_date.isoformat(),
+        "end_date": today.isoformat(),
+        "unique_supplements": len(supplements),
+        "supplements": supplements,
     }
 
 
@@ -2294,11 +2842,12 @@ async def body_measurements(
     user=Depends(get_agent_user),
     db: Session = Depends(get_db),
 ):
-    """Антропометрия: талия, шея, бёдра, грудь, бедро, бицепс (см).
+    """Антропометрия: талия, шея, бёдра, грудь, бедро, бицепс (см), сила хвата (кг).
 
     Источник: `body_measurements` table — ручной ввод пользователя через бот/админку.
     Талия — важная метрика метаболического здоровья (waist circumference > BMI
-    по предсказанию ССЗ-риска, особенно для visceral fat).
+    по предсказанию ССЗ-риска, особенно для visceral fat). Сила хвата (grip_right_kg/
+    grip_left_kg, ручной динамометр) — маркер саркопении/функциональной силы.
 
     Возвращает latest замер, all-time min/max каждой метрики с датами, и
     тренд waist (last 6 measurements) — самая клинически релевантная.
@@ -2308,7 +2857,8 @@ async def body_measurements(
     rows = db.execute(
         sql_text(
             """
-            SELECT date, waist_cm, neck_cm, hips_cm, chest_cm, thigh_cm, biceps_cm, notes
+            SELECT date, waist_cm, neck_cm, hips_cm, chest_cm, thigh_cm, biceps_cm,
+                   grip_right_kg, grip_left_kg, notes
             FROM body_measurements
             WHERE user_id = :uid
             ORDER BY date DESC
@@ -2321,7 +2871,7 @@ async def body_measurements(
         return {"status": "no_data", "count": 0, "reason": "no body_measurements entries"}
 
     latest = rows[0]
-    metrics = ["waist_cm", "neck_cm", "hips_cm", "chest_cm", "thigh_cm", "biceps_cm"]
+    metrics = ["waist_cm", "neck_cm", "hips_cm", "chest_cm", "thigh_cm", "biceps_cm", "grip_right_kg", "grip_left_kg"]
 
     def _extremes(metric: str) -> dict | None:
         vals = [(r.date, getattr(r, metric)) for r in rows if getattr(r, metric) is not None]
@@ -2330,9 +2880,9 @@ async def body_measurements(
         min_v = min(vals, key=lambda x: x[1])
         max_v = max(vals, key=lambda x: x[1])
         return {
-            "min": {"date": min_v[0].isoformat(), "value_cm": round(min_v[1], 1)},
-            "max": {"date": max_v[0].isoformat(), "value_cm": round(max_v[1], 1)},
-            "current_cm": round(getattr(latest, metric), 1) if getattr(latest, metric) is not None else None,
+            "min": {"date": min_v[0].isoformat(), "value": round(min_v[1], 1)},
+            "max": {"date": max_v[0].isoformat(), "value": round(max_v[1], 1)},
+            "current": round(getattr(latest, metric), 1) if getattr(latest, metric) is not None else None,
             "count": len(vals),
         }
 
@@ -2544,7 +3094,7 @@ async def profile_questionnaire(
 @router.post("/update_profile_questionnaire")
 async def update_profile_questionnaire(
     req: UpdateProfileRequest,
-    user=Depends(get_agent_user),
+    user=Depends(require_agent_scope("rw")),
     db: Session = Depends(get_db),
 ):
     """Обновить анкетные поля. Только те что переданы — остальные не трогаются.
@@ -2595,10 +3145,63 @@ async def update_profile_questionnaire(
     }
 
 
+class SaveHealthProfileRequest(BaseModel):
+    chronic_conditions: list[str] = Field(default_factory=list)
+    allergies: list[str] = Field(default_factory=list)
+    nothing_to_report: bool = False
+
+
+@router.post("/save_health_profile")
+async def save_health_profile(
+    req: SaveHealthProfileRequest,
+    user=Depends(require_agent_scope("rw")),
+    db: Session = Depends(get_db),
+):
+    """Записать медпрофиль со слов пациента (#340).
+
+    Онбординг-квиз про хроники и постоянные лекарства больше не спрашивает
+    (шаг убран в f366c98), поэтому у самозарегистрированного юзера медпрофиль
+    пуст, пока он не загрузит документ через /doc. Этот эндпоинт — второй
+    канал: агент спрашивает в диалоге и сохраняет ответ.
+
+    Пишет в те же ключи `users.onboarding_data`, откуда читают промпт-блок,
+    отчёт для врача и /meal_context (реестр — core/health/onboarding_lists.py),
+    через `merge_onboarding_lists` (дедуп case-insensitive).
+
+    Флаг `health_profile_asked` ставится в любом случае — и когда что-то
+    записали, и когда пользователю нечего сообщить: вопрос задан, повторять
+    его не нужно.
+    """
+    from database.crud import get_user_by_telegram_id, merge_onboarding_lists
+
+    added: dict[str, int] = {}
+    if req.chronic_conditions or req.allergies:
+        added = merge_onboarding_lists(
+            db,
+            user.telegram_id,
+            {"allergies": req.allergies, "chronic_conditions": req.chronic_conditions},
+        )
+
+    row = get_user_by_telegram_id(db, user.telegram_id)
+    if row is None:
+        return {"status": "error", "error": "user not found"}
+    data = dict(row.onboarding_data or {})
+    data["health_profile_asked"] = True
+    row.onboarding_data = data  # реассайн → SQLAlchemy видит изменение JSONB
+    db.commit()
+
+    return {
+        "status": "ok",
+        "added": added,
+        "nothing_to_report": req.nothing_to_report,
+        "health_profile_asked": True,
+    }
+
+
 @router.post("/update_user_settings")
 async def update_user_settings_endpoint(
     req: UpdateUserSettingsRequest,
-    user=Depends(get_agent_user),
+    user=Depends(require_agent_scope("rw")),
     db: Session = Depends(get_db),
 ):
     """Обновить настройки в user_settings table. Только переданные поля.

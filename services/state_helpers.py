@@ -8,7 +8,7 @@ Helper функции для безопасной работы с состоян
 from typing import List, Optional, Dict, Any
 from pathlib import Path
 from services.state import UserState, state_manager
-from services.state_models import MenuData, PhotoStateData
+from services.state_models import MealStateData, MenuData, PhotoStateData
 
 
 def create_photo_state(
@@ -123,6 +123,22 @@ def get_menu_data_from_state(user_id: str, state_mgr=None) -> Optional[MenuData]
         return None
 
     return MenuData(**menu_data_dict)
+
+
+def build_meal_state_data(**kwargs) -> Dict[str, Any]:
+    """
+    Собрать и провалидировать данные meal-flow состояния (waiting_confirmation).
+
+    Использовать при СОЗДАНИИ dict для UserState.data вместо dict-литерала:
+    MealStateData(extra="forbid") ловит опечатку в имени ключа (например
+    photo_path вместо photo_paths, #256) сразу здесь, а не тихой потерей
+    данных при чтении в save_meal_to_db().
+
+    Raises:
+        pydantic.ValidationError: при опечатке в имени ключа или отсутствии
+            обязательных полей (meal_items, meal_totals).
+    """
+    return MealStateData(**kwargs).model_dump(exclude_none=True)
 
 
 def preserve_and_merge_state_data(

@@ -91,10 +91,17 @@
     const goal = Math.round(g.kcal);
     const diff = goal - consumed;
     const isOver = diff < 0;
-    const cls = isOver ? 'over' : diff / goal < 0.15 ? 'warn' : 'ok';
+    // Прошедший день с частичным Garmin-синком: цель оценочная (по среднему),
+    // вердикт «перебор» по мусорным данным не выносим — нейтральный стиль и «≈».
+    const incomplete = !!g.data_incomplete;
+    const cls = incomplete ? 'warn' : isOver ? 'over' : diff / goal < 0.15 ? 'warn' : 'ok';
 
-    const heroText = isOver ? `−${Math.abs(diff)} ккал` : `+${diff} ккал`;
-    const subText = isOver
+    const heroText = incomplete
+      ? `≈${isOver ? '−' : '+'}${Math.abs(diff)} ккал`
+      : isOver ? `−${Math.abs(diff)} ккал` : `+${diff} ккал`;
+    const subText = incomplete
+      ? `⚠️ данные о расходе неполные · съедено ${consumed} из ~${goal}`
+      : isOver
       ? `перебор · съедено ${consumed} из ${goal}`
       : `осталось · съедено ${consumed} из ${goal}`;
 
@@ -129,6 +136,12 @@
         if (goalPct < 0) lines.push(`🎯 −${Math.abs(goalPct)}% дефицит`);
         else if (goalPct > 0) lines.push(`🎯 +${goalPct}% профицит`);
         else lines.push(`🎯 поддержание`);
+      }
+
+      // Adaptive TDEE: maintenance выведен из питания+веса пользователя,
+      // а не из оценки девайса — подписываем источник.
+      if (g.tdee_source === 'adaptive' && g.tdee_days) {
+        lines.push(`<span class="bmr-today-hint">📈 по вашим данным за ${g.tdee_days} дн.</span>`);
       }
       infoCol = `<div class="budget-info-col">${lines.join('<br>')}</div>`;
     }
