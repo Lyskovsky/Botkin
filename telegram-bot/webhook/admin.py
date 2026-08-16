@@ -297,7 +297,7 @@ input.editable:focus{border-color:var(--b);outline:none;background:var(--bg2)}
     <summary class="muted">📜 Последние 10 событий audit_log</summary>
     <div style="font-size:11px; color:var(--muted); margin: 4px 0 8px">
       audit_log хранит INSERT/UPDATE/DELETE на чувствительных таблицах (weights, blood_pressure_logs, blood_tests, user_settings) — кто что менял и когда.
-      Используется для прозрачности (когда работают двое +) и аудита SQL-апдейтов мимо приложения. Чистить не надо — компактен (1.6 МБ на 2671 строку).
+      Используется для прозрачности (когда работают двое +) и аудита SQL-апдейтов мимо приложения. Чистить не надо — растёт медленно и не угрожает месту на диске (13 МБ / 24К строк на 16.08.2026, для сравнения — 1.6 МБ / 2.7К строк на момент введения).
     </div>
     <table style="font-size:11px"><thead><tr><th>Время</th><th>Юзер</th><th>Таблица</th><th>Действие</th></tr></thead>
     <tbody id="bothealth-audit"></tbody></table>
