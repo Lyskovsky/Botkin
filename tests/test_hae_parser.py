@@ -191,3 +191,62 @@ def test_multiple_days_grouped():
     out = _hae_to_daily_payloads([m1, m2])
     assert out["2026-06-01"].steps == 10000
     assert out["2026-06-02"].steps == 8000
+
+
+# ── Кумулятивные метрики: суммирование по дню (регресс «3 шага в сутки») ──────
+#
+# HAE шлёт день ОДНОЙ записью только при «Суммировать: ON» + группировке «День».
+# Если настройка сбита или экспорт идёт интервалами, за день приходит несколько
+# записей. Раньше каждая следующая перезатирала предыдущую, и в БД оседал
+# последний огрызок: реальные ~6000 шагов превращались в 3–6 (данные 11–12.08.2026).
+
+
+def _metric_multi(name, units, qtys):
+    """Одна метрика, несколько внутридневных записей (интервалы одного дня)."""
+    return {
+        "name": name,
+        "units": units,
+        "data": [{"date": f"{D} {h:02d}:00:00 +0300", "qty": q} for h, q in enumerate(qtys)],
+    }
+
+
+def test_steps_summed_across_intervals():
+    (payload,) = _hae_to_daily_payloads([_metric_multi("step_count", "count", [4000, 2000, 3])]).values()
+    assert payload.steps == 6003  # не 3 — последняя запись больше не затирает сумму
+
+
+def test_distance_summed_across_intervals():
+    (payload,) = _hae_to_daily_payloads([_metric_multi("walking_running_distance", "km", [3.0, 1.5, 0.004])]).values()
+    assert payload.distance_walking_km == 4.504
+
+
+def test_flights_and_energy_summed_across_intervals():
+    metrics = [
+        _metric_multi("flights_climbed", "count", [5, 3]),
+        _metric_multi("active_energy", "kcal", [200.0, 150.5]),
+    ]
+    (payload,) = _hae_to_daily_payloads(metrics).values()
+    assert payload.flights_climbed == 8
+    assert payload.active_energy_kcal == 350.5
+
+
+def test_single_daily_record_unchanged():
+    """Штатный режим (одна запись за день) не должен измениться от суммирования."""
+    (payload,) = _hae_to_daily_payloads([_metric("step_count", "count", qty=8432)]).values()
+    assert payload.steps == 8432
+
+
+def test_state_metrics_not_summed():
+    """Пульс — состояние, а не счётчик: суммировать нельзя, берём последнее значение."""
+    metrics = [
+        {
+            "name": "heart_rate",
+            "units": "count/min",
+            "data": [
+                {"date": f"{D} 08:00:00 +0300", "Avg": 70, "Min": 55, "Max": 120},
+                {"date": f"{D} 20:00:00 +0300", "Avg": 75, "Min": 60, "Max": 130},
+            ],
+        }
+    ]
+    (payload,) = _hae_to_daily_payloads(metrics).values()
+    assert payload.heart_rate_avg == 75  # не 145
