@@ -464,7 +464,18 @@ def _hae_pick(rec: dict, *keys, default=None):
 
 
 def _hae_to_daily_payloads(metrics: list[dict]) -> dict[str, AppleHealthPayload]:
-    """Сгруппировать HAE metrics → {YYYY-MM-DD: AppleHealthPayload}."""
+    """Сгруппировать HAE metrics → {YYYY-MM-DD: AppleHealthPayload}.
+
+    Кумулятивные метрики (шаги, дистанция, этажи, энергия) СУММИРУЮТСЯ по дню:
+    HAE присылает день одной записью только при «Суммировать: ON» + группировке
+    «День». Если настройка сбита (или экспорт идёт интервалами), за день приходит
+    несколько записей — раньше каждая следующая перезатирала предыдущую, и в БД
+    оседал последний огрызок интервала: реальные ~6000 шагов превращались в 3–6
+    (зафиксировано на данных 11–12.08.2026).
+
+    Метрики-состояния (пульс, ВСР, вес) не кумулятивны — для них перезапись
+    последним значением остаётся верной, суммировать их нельзя.
+    """
     by_date: dict[str, dict] = {}
 
     for m in metrics:
@@ -477,16 +488,18 @@ def _hae_to_daily_payloads(metrics: list[dict]) -> dict[str, AppleHealthPayload]
             slot = by_date.setdefault(d, {"date": d})
 
             if name == "step_count":
-                slot["steps"] = int(_hae_pick(rec, "qty", "Avg", default=0))
+                slot["steps"] = int(slot.get("steps") or 0) + int(_hae_pick(rec, "qty", "Avg", default=0))
             elif name in ("walking_running_distance", "walking_distance", "distance_walking_running"):
                 qty = float(_hae_pick(rec, "qty", "Avg", default=0))
                 if units == "m":
                     qty /= 1000
                 elif units == "mi":
                     qty *= 1.60934
-                slot["distance_walking_km"] = round(qty, 3)
+                slot["distance_walking_km"] = round(float(slot.get("distance_walking_km") or 0) + qty, 3)
             elif name == "flights_climbed":
-                slot["flights_climbed"] = int(_hae_pick(rec, "qty", "Avg", default=0))
+                slot["flights_climbed"] = int(slot.get("flights_climbed") or 0) + int(
+                    _hae_pick(rec, "qty", "Avg", default=0)
+                )
             elif name in ("active_energy", "active_energy_burned"):
                 qty = float(_hae_pick(rec, "qty", "Avg", default=0))
                 # HAE баг: шлёт МДж (MJ), но пишет units="kJ".
@@ -496,7 +509,7 @@ def _hae_to_daily_payloads(metrics: list[dict]) -> dict[str, AppleHealthPayload]
                     qty = round(qty * 239.006, 1)  # MJ → kcal
                 elif units == "kj":
                     qty = round(qty / 4.184, 1)  # kJ → kcal
-                slot["active_energy_kcal"] = qty
+                slot["active_energy_kcal"] = round(float(slot.get("active_energy_kcal") or 0) + qty, 1)
             elif name in ("basal_energy_burned", "resting_energy"):
                 qty = float(_hae_pick(rec, "qty", "Avg", default=0))
                 # HAE баг: шлёт МДж (MJ), но пишет units="kJ".
@@ -506,7 +519,7 @@ def _hae_to_daily_payloads(metrics: list[dict]) -> dict[str, AppleHealthPayload]
                     qty = round(qty * 239.006, 1)  # MJ → kcal
                 elif units == "kj":
                     qty = round(qty / 4.184, 1)  # kJ → kcal
-                slot["basal_energy_kcal"] = qty
+                slot["basal_energy_kcal"] = round(float(slot.get("basal_energy_kcal") or 0) + qty, 1)
             elif name == "heart_rate":
                 if "Avg" in rec and rec["Avg"] is not None:
                     slot["heart_rate_avg"] = int(round(float(rec["Avg"])))

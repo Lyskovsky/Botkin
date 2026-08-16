@@ -178,6 +178,26 @@ def test_read_existing_profile_reads_onboarding(test_db, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_doc_received_album_asks_to_send_one_by_one():
+    """Если пришёл альбом из нескольких файлов — просим прислать по одному,
+    не обрабатывая ни один из них (иначе остальные файлы молча теряются)."""
+    from handlers.doc_upload import doc_received
+
+    doc1 = MagicMock()
+    doc2 = MagicMock()
+    msg1 = _make_message(document=doc1)
+    msg2 = _make_message(document=doc2)
+    state = AsyncMock()
+
+    await doc_received(msg1, state, album=[msg1, msg2])
+
+    msg1.answer.assert_called_once()
+    reply_text = msg1.answer.call_args[0][0]
+    assert "по одному" in reply_text.lower()
+    state.update_data.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_doc_confirm_save_merges_into_onboarding(test_db, tmp_path, monkeypatch):
     import handlers.doc_upload as mod
     from database.models import User

@@ -188,6 +188,37 @@ class LogBPRequest(BaseModel):
     measured_at: Optional[str] = None  # ISO datetime; defaults to now
 
 
+# Границы правдоподобия для measured_at замера с весов. Умных весов с передачей
+# состава тела в 1999 не существовало, а замер «из будущего» — рассинхрон часов
+# клиента (сутки запаса) либо мусор.
+EARLIEST_PLAUSIBLE_MEASUREMENT = datetime(2000, 1, 1, tzinfo=timezone.utc)
+FUTURE_MEASUREMENT_TOLERANCE = timedelta(days=1)
+
+
+class BodyCompositionMeasurement(BaseModel):
+    """Один замер с умных весов. Границы — санити-чек на ошибку единиц измерения."""
+
+    measured_at: str = Field(..., description="ISO datetime замера (реальное время с весов)")
+    weight: float = Field(..., gt=20, le=400, description="Вес, кг")
+    body_fat: Optional[float] = Field(None, ge=0, le=100, description="Жир, %")
+    muscle_mass: Optional[float] = Field(None, ge=0, le=200, description="Мышечная масса, кг")
+    water: Optional[float] = Field(None, ge=0, le=100, description="Вода, %")
+    bone_mass: Optional[float] = Field(None, ge=0, le=50, description="Костная масса, кг")
+    visceral_fat: Optional[float] = Field(None, ge=0, le=60, description="Висцеральный жир (индекс)")
+    bmi: Optional[float] = Field(None, gt=5, le=100, description="ИМТ")
+
+
+class LogBodyCompositionRequest(BaseModel):
+    measurements: list[BodyCompositionMeasurement] = Field(
+        ..., min_length=1, max_length=500, description="Батч замеров (импорт истории — одним запросом)"
+    )
+    source: str = Field(
+        "agent_api",
+        pattern=r"^[a-z0-9_]{1,50}$",
+        description="Канал данных: withings / zepp / hae / agent_api",
+    )
+
+
 class EditMealRequest(BaseModel):
     meal_id: int
     new_date: Optional[str] = None  # YYYY-MM-DD — перенести на другой день
@@ -697,6 +728,107 @@ async def log_bp(
         "systolic": req.systolic,
         "diastolic": req.diastolic,
         "pulse": req.pulse,
+    }
+
+
+@router.post("/log_body_composition")
+async def log_body_composition(
+    req: LogBodyCompositionRequest,
+    user=Depends(require_agent_scope("rw")),
+    db: Session = Depends(get_db),
+):
+    """Записать замеры состава тела с внешних умных весов в `weights`.
+
+    Зачем отдельный канал: в HealthKit нет типов для мышечной массы, воды, костной
+    массы и висцерального жира — через Apple Health / HAE доходят только вес, % жира
+    и безжировая масса. Полный состав приходит либо от Withings/Zepp напрямую, либо
+    исторически заливался с мака владельца через ssh + psql суперюзером
+    (`scripts/import/zepp_csv.py`), что требовало доступа к прод-серверу.
+
+    Этот эндпоинт закрывает ту же задачу по HTTPS с PAT-токеном: `user_id` берётся
+    из токена (не из тела запроса), RLS изолирует данные, доступ к серверу и
+    суперюзер Postgres не нужны.
+
+    Батч атомарен: все таймстампы валидируются до первой записи, поэтому битый замер
+    не оставляет половину истории записанной. Повторный `measured_at` внутри одного
+    батча — не ошибка, применяется последний (см. flush в upsert_device_weight).
+
+    `measured_at` обязан нести часовой пояс — ключ идемпотентности должен означать
+    один и тот же момент независимо от того, как клиент его сериализовал.
+    """
+    from database.crud import MANUAL_WEIGHT_SOURCES, upsert_device_weight
+
+    # Ручные источники дедупятся по календарному дню в upsert_manual_weight (#170).
+    # Если пустить device-замеры под таким source, ручной апсерт потом подменит
+    # реальный замер с весов — каналы должны остаться различимыми.
+    if req.source in MANUAL_WEIGHT_SOURCES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"source={req.source!r} зарезервирован за ручным вводом. Используйте имя канала (withings, zepp, hae).",
+        )
+
+    now = datetime.now(timezone.utc)
+    parsed = []
+    for m in req.measurements:
+        try:
+            measured_at = datetime.fromisoformat(m.measured_at)
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid measured_at: {m.measured_at!r}. Use ISO datetime with UTC offset.",
+            )
+
+        # Требуем явный офсет: эндпоинт нужен для ИДЕМПОТЕНТНОГО импорта, а ключ
+        # идемпотентности — measured_at. Naive-строка на Postgres трактуется по
+        # session TimeZone (нигде не зафиксирован), поэтому один и тот же момент,
+        # присланный то с офсетом то без, дал бы два ряда вместо одного.
+        if measured_at.tzinfo is None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"measured_at={m.measured_at!r} без часового пояса. "
+                    "Укажите офсет явно (например 2026-08-01T07:00:00+03:00 или ...Z)."
+                ),
+            )
+        measured_at = measured_at.astimezone(timezone.utc)
+
+        # Санити-границы: мусорная дата молча перекосила бы агрегаты дашборда и phenoage
+        if measured_at < EARLIEST_PLAUSIBLE_MEASUREMENT or measured_at > now + FUTURE_MEASUREMENT_TOLERANCE:
+            raise HTTPException(
+                status_code=422,
+                detail=f"measured_at={m.measured_at!r} вне правдоподобного диапазона замеров.",
+            )
+
+        parsed.append((measured_at, m))
+
+    inserted = 0
+    updated = 0
+    for measured_at, m in parsed:
+        created = upsert_device_weight(
+            db,
+            user_id=user.telegram_id,
+            measured_at=measured_at,
+            weight=m.weight,
+            body_fat=m.body_fat,
+            muscle_mass=m.muscle_mass,
+            water=m.water,
+            bmi=m.bmi,
+            # Колонка visceral_fat — INTEGER, весы отдают float
+            visceral_fat=round(m.visceral_fat) if m.visceral_fat is not None else None,
+            bone_mass=m.bone_mass,
+            source=req.source,
+        )
+        if created:
+            inserted += 1
+        else:
+            updated += 1
+    db.commit()
+
+    return {
+        "status": "ok",
+        "inserted": inserted,
+        "updated": updated,
+        "source": req.source,
     }
 
 

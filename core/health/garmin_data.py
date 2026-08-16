@@ -5,7 +5,7 @@ Garmin data synchronization and retrieval functions
 
 import logging
 import os
-from datetime import datetime, date as date_type, timezone
+from datetime import datetime, date as date_type, time as time_type, timedelta, timezone
 from typing import Optional, Dict, Tuple
 from database import SessionLocal, get_activity_by_date
 
@@ -13,6 +13,13 @@ from database import SessionLocal, get_activity_by_date
 _GARTH_HOME = os.getenv("GARTH_HOME", "/app/data/garth")
 # Don't re-fetch from Garmin if synced within this many minutes
 _CACHE_MINUTES = 15
+# Garmin отдаёт BMR/total нарастающим итогом в течение дня. Строка за прошедший
+# день финальна, только если последний синк случился спустя этот запас часов
+# после конца дня (часы обычно досинкивают день в Garmin утром следующего).
+_FINAL_GRACE_HOURS = 12
+# Сколько прошедших дней проверять на «замороженный» частичный снимок.
+# 14 = окно усреднения в caloric_budget.get_daily_budget.
+_RESYNC_LOOKBACK_DAYS = 14
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +66,78 @@ def get_garmin_data_for_date(date: str, user_id: int) -> Optional[Dict]:
         }
     finally:
         db.close()
+
+
+def _save_garmin_stats(db, user_id: int, day: date_type, stats: Dict) -> None:
+    """Записывает дневную сводку Garmin в activity_log (общий маппинг полей)."""
+    from database.crud import create_or_update_activity
+
+    sleep_sec = stats.get("sleepingSeconds") or stats.get("measurableAsleepDuration")
+    sleep_hours = round(sleep_sec / 3600.0, 2) if sleep_sec else None
+    create_or_update_activity(
+        db=db,
+        user_id=user_id,
+        date=day,
+        steps=stats.get("totalSteps"),
+        active_calories=stats.get("activeKilocalories"),
+        total_calories=stats.get("totalKilocalories"),
+        bmr_calories=stats.get("bmrKilocalories"),
+        distance_km=(stats.get("totalDistanceMeters") or 0) / 1000.0,
+        sleep_hours=sleep_hours,
+        heart_rate_avg=stats.get("restingHeartRate") or stats.get("minHeartRate"),
+        stress_level=stats.get("averageStressLevel"),
+        source="garmin_connect",
+        raw_data=stats,
+    )
+
+
+def _day_is_final(activity, day: date_type, user_tz) -> bool:
+    """Финальна ли строка activity_log за прошедший день.
+
+    Синк, случившийся до (конец дня + _FINAL_GRACE_HOURS), — это промежуточный
+    снимок: BMR/total в Garmin растут в течение дня, а часы досинкивают день
+    задним числом. Такую строку нужно перечитать из API.
+    """
+    if not activity or activity.synced_at is None:
+        return False
+    synced = activity.synced_at
+    if synced.tzinfo is None:
+        synced = synced.replace(tzinfo=timezone.utc)
+    day_end = datetime.combine(day + timedelta(days=1), time_type.min, tzinfo=user_tz)
+    return synced >= day_end + timedelta(hours=_FINAL_GRACE_HOURS)
+
+
+def _resync_stale_past_days(client, db, user_id: int, today: date_type) -> int:
+    """Досинкивает прошедшие дни с нефинальными («замороженными») снимками.
+
+    Прецедент 15.08.2026: сервер синкал только «сегодня», день замораживался
+    вечерним снимком (BMR 1604 в среднем вместо финальных ~1917) — 14-дневное
+    среднее занижало базовый расход и цель калорий на ~300-400 ккал.
+
+    Возвращает число пересинканных дней. Ошибки по отдельным дням не роняют
+    основной синк.
+    """
+    from core.infra.tz import get_user_tz
+
+    user_tz = get_user_tz(user_id)
+    resynced = 0
+    for offset in range(1, _RESYNC_LOOKBACK_DAYS + 1):
+        day = today - timedelta(days=offset)
+        activity = get_activity_by_date(db, user_id, day)
+        if _day_is_final(activity, day, user_tz):
+            continue
+        try:
+            stats = client.get_stats(day.strftime("%Y-%m-%d"))
+        except Exception as e:
+            logger.warning(f"Garmin resync {day} failed for user {user_id}: {e}")
+            continue
+        if not stats:
+            continue
+        _save_garmin_stats(db, user_id, day, stats)
+        resynced += 1
+    if resynced:
+        logger.info(f"Garmin: finalized {resynced} stale past day(s) for user {user_id}")
+    return resynced
 
 
 def sync_today_garmin(user_id: int, target_date: Optional[date_type] = None) -> Tuple[float, str]:
@@ -141,29 +220,17 @@ def sync_today_garmin(user_id: int, target_date: Optional[date_type] = None) -> 
             cached_val = float(activity.active_calories or 0) if activity else 0.0
             return (cached_val, "error")
 
+        # --- 5. Save to DB + досинк «замороженных» прошедших дней ---
+        if stats:
+            _save_garmin_stats(db, user_id, target_date, stats)
+
+        try:
+            _resync_stale_past_days(client, db, user_id, target_date)
+        except Exception as e:
+            logger.warning(f"Garmin resync of past days failed for user {user_id}: {e}")
+
         if not stats:
             return (0.0, "ok")
-
-        # --- 5. Save to DB ---
-        from database.crud import create_or_update_activity
-
-        sleep_sec = stats.get("sleepingSeconds") or stats.get("measurableAsleepDuration")
-        sleep_hours = round(sleep_sec / 3600.0, 2) if sleep_sec else None
-        create_or_update_activity(
-            db=db,
-            user_id=user_id,
-            date=target_date,
-            steps=stats.get("totalSteps"),
-            active_calories=stats.get("activeKilocalories"),
-            total_calories=stats.get("totalKilocalories"),
-            bmr_calories=stats.get("bmrKilocalories"),
-            distance_km=(stats.get("totalDistanceMeters") or 0) / 1000.0,
-            sleep_hours=sleep_hours,
-            heart_rate_avg=stats.get("restingHeartRate") or stats.get("minHeartRate"),
-            stress_level=stats.get("averageStressLevel"),
-            source="garmin_connect",
-            raw_data=stats,
-        )
         return (float(stats.get("activeKilocalories") or 0), "ok")
 
     except Exception as e:
@@ -186,7 +253,7 @@ def sync_garmin_data(user_id: int, sync_date: Optional[date_type] = None):
 
     # 1. Get credentials
     import os
-    from database import get_user_by_telegram_id, create_or_update_activity
+    from database import get_user_by_telegram_id
 
     db = SessionLocal()
     try:
@@ -235,23 +302,7 @@ def sync_garmin_data(user_id: int, sync_date: Optional[date_type] = None):
             return
 
         # 4. Save to DB (включая сон, если API вернул sleepingSeconds)
-        sleep_sec = stats.get("sleepingSeconds") or stats.get("measurableAsleepDuration")
-        sleep_hours = round(sleep_sec / 3600.0, 2) if sleep_sec else None
-        create_or_update_activity(
-            db=db,
-            user_id=user.telegram_id,
-            date=target_date,
-            steps=stats.get("totalSteps"),
-            active_calories=stats.get("activeKilocalories"),
-            total_calories=stats.get("totalKilocalories"),
-            bmr_calories=stats.get("bmrKilocalories"),
-            distance_km=(stats.get("totalDistanceMeters") or 0) / 1000.0,
-            sleep_hours=sleep_hours,
-            heart_rate_avg=stats.get("restingHeartRate") or stats.get("minHeartRate"),
-            stress_level=stats.get("averageStressLevel"),
-            source="garmin_connect",
-            raw_data=stats,
-        )
+        _save_garmin_stats(db, user.telegram_id, target_date, stats)
         return True
 
     except Exception as e:
