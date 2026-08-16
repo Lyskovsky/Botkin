@@ -1221,6 +1221,22 @@ async def handle_description(
             # BotkinClaw через tools сам решит что нужно.
             state_manager.clear_state(user_id)
 
+            # Не распознали как еду/вес/добавки/АД/замеры — прежде фото просто
+            # терялось (issue #370: папа Александра прислал фото страховки,
+            # BotkinClaw мог только посоветовать /doc). Архивируем сразу.
+            archived_names: list[str] = []
+            try:
+                from handlers.doc_upload import archive_photo_as_document
+
+                for ph_path in photo_paths:
+                    archived_names.append(
+                        archive_photo_as_document(
+                            int(user_id), ph_path, reason="не распознано как еда/вес/добавки/АД/замеры"
+                        )
+                    )
+            except Exception:
+                logger.exception("Не удалось авто-архивировать нераспознанное фото (user %s)", user_id)
+
             actual_caption = (caption or "").strip()
             if actual_caption:
                 # Передаём агенту — он умнее stock-message
@@ -1233,7 +1249,9 @@ async def handle_description(
                         f"[Пользователь прислал фото с подписью]: {actual_caption}\n\n"
                         f"(LLM-vision не распознал на фото еду/вес/добавки/АД/замеры тела. "
                         f"Это вероятно скриншот приложения, медицинский документ, фото объекта "
-                        f"или вопрос с контекстом. Разберись через свои tools и ответь по существу.)"
+                        f"или вопрос с контекстом. Фото уже сохранено в архив документов профиля — "
+                        f"НЕ предлагай пользователю /doc или другое хранилище, оно уже сохранено. "
+                        f"Разберись через свои tools и ответь по существу.)"
                     )
 
                     await processing_message.edit_text("🤔 думаю...")
@@ -1269,9 +1287,11 @@ async def handle_description(
                     # Дальше — обычный stock-message
 
             # Caption нет ИЛИ агент упал — обычный понятный ответ без state
+            archive_note = "\n\n📁 Фото на всякий случай сохранил в архив документов профиля." if archived_names else ""
             await processing_message.edit_text(
-                "❌ Не удалось распознать что это за еда.\n\n"
-                "💡 Если это не еда — напиши текстом что хотел сказать "
+                "❌ Не удалось распознать что это за еда."
+                + archive_note
+                + "\n\n💡 Если это не еда — напиши текстом что хотел сказать "
                 "(вопрос про здоровье, замер «120/80 пульс 70», вес и т.п.). Я разберусь."
             )
             return
