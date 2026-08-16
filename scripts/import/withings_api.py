@@ -20,9 +20,17 @@ data/cache/withings_tokens.json (env нужен только для первич
 Токен из кэша имеет приоритет над env: иначе после ротации env-значение
 протухает и логин ломается.
 
+Общий токен с Withings-MCP (рекомендуемый способ на Маке, без второго приложения):
+задать WITHINGS_TOKENS_PATH на токен-файл MCP + client_id/secret того же приложения
+(напр. из Keychain). Тогда MCP и импортёр делят ОДНО хранилище — ротация общая,
+конфликта нет. _save_tokens мержит, чтобы не затереть ключи MCP (userid и пр.).
+
 Квирк API: HTTP-код всегда 200, реальный статус — в теле (`status`, 0 = ok).
 
 Использование:
+    # основной путь — через Botkin API (нужен BOTKIN_PAT со scope rw):
+    python scripts/import/withings_api.py --user 836757955 --days 90 --push-api --min-weight 90
+    # изнутри контейнера / с DATABASE_URL:
     python scripts/import/withings_api.py --user 836757955 --days 90
     python scripts/import/withings_api.py --user 836757955 --dry-run
 """
@@ -49,7 +57,11 @@ TOKEN_URL = "https://wbsapi.withings.net/v2/oauth2"
 MEASURE_URL = "https://wbsapi.withings.net/measure"
 
 # Кэш токенов (refresh ротируется — держим на диске, чтобы переживать рестарт).
-TOKEN_CACHE = ROOT / "data" / "cache" / "withings_tokens.json"
+# WITHINGS_TOKENS_PATH позволяет указать на ЧУЖОЙ токен-файл и делить его: так
+# импортёр на Маке переиспользует токен локального Withings-MCP — единое хранилище,
+# ротация общая → нет взаимной инвалидации, второе приложение не нужно.
+# При общем файле _save_tokens мержит (не затирает чужие ключи вроде userid).
+TOKEN_CACHE = Path(os.getenv("WITHINGS_TOKENS_PATH") or ROOT / "data" / "cache" / "withings_tokens.json")
 
 # meastype → поле. Коды из официального API (сверено с рабочим клиентом).
 # Берём только то, что нужно таблице weights; давление/SpO2 идут своим каналом.
@@ -58,7 +70,7 @@ MEASURE_TYPES = {
     5: "lean_mass",  # безжировая масса, кг (в weights не пишем, для диагностики)
     6: "body_fat",  # % жира
     76: "muscle_mass",  # кг
-    77: "water",  # кг
+    77: "hydration_kg",  # КИЛОГРАММЫ; в weights.water ожидаются ПРОЦЕНТЫ → пересчёт в parse
     88: "bone_mass",  # кг
     170: "visceral_fat",  # индекс
     226: "bmr",  # основной обмен, ккал (колонки нет — только для --dry-run)
@@ -85,9 +97,17 @@ def _load_cached_tokens() -> dict:
 
 
 def _save_tokens(tokens: dict) -> None:
+    """Записать токены, СОХРАНИВ прочие ключи существующего файла.
+
+    Merge критичен при общем хранилище с Withings-MCP: у него в файле свои ключи
+    (`userid` и др.). Перезаписать файл только token-полями = сломать MCP, поэтому
+    читаем существующее и обновляем поверх.
+    """
     try:
+        merged = _load_cached_tokens()
+        merged.update(tokens)
         TOKEN_CACHE.parent.mkdir(parents=True, exist_ok=True)
-        TOKEN_CACHE.write_text(json.dumps(tokens))
+        TOKEN_CACHE.write_text(json.dumps(merged))
         TOKEN_CACHE.chmod(0o600)  # oauth-токены мед-аккаунта — только владельцу
     except OSError as e:
         logger.warning("не смог сохранить withings-токены: %s", e)
@@ -99,7 +119,17 @@ def _current_refresh_token() -> str:
 
 
 def get_access_token() -> str:
-    """Свежий access_token по refresh-токену. Ротированный refresh сохраняет на диск."""
+    """Валидный access_token из общего кэша; протух/нет — refresh (ротированный сохраняем).
+
+    Сначала пробуем действующий access_token из файла (буфер 5 мин, как в MCP) — так
+    при общем хранилище лишний раз не ротируем токен и не дёргаем сеть.
+    """
+    cached = _load_cached_tokens()
+    access_cached = cached.get("access_token")
+    exp = cached.get("expires_at") or 0
+    if access_cached and (exp - time.time()) > 300:
+        return access_cached
+
     client_id = os.getenv("WITHINGS_CLIENT_ID", "")
     client_secret = os.getenv("WITHINGS_CLIENT_SECRET", "")
     refresh = _current_refresh_token()
@@ -180,6 +210,10 @@ def parse_measure_groups(groups: list[dict]) -> list[dict]:
 
     Группы без веса отбрасываем: weights.weight NOT NULL, а отдельные группы
     бывают только с пульсом (весы пишут его отдельной группой).
+
+    Вода: Withings отдаёт КИЛОГРАММЫ (hydration), а `weights.water` и поле API —
+    ПРОЦЕНТЫ (так пишет канал HAE, и валидатор эндпоинта ограничивает 0..100).
+    Пересчитываем здесь, в одном месте на оба пути записи.
     """
     rows: list[dict] = []
     for grp in groups:
@@ -190,9 +224,34 @@ def parse_measure_groups(groups: list[dict]) -> list[dict]:
                 row[field] = round(measure_value(measure), 3)
         if "weight" not in row:
             continue
+        hydration = row.pop("hydration_kg", None)
+        if hydration is not None and row["weight"]:
+            row["water"] = round(hydration / row["weight"] * 100, 1)
         row["measured_at"] = datetime.fromtimestamp(grp.get("date", 0), tz=timezone.utc)
         rows.append(row)
     return sorted(rows, key=lambda r: r["measured_at"])
+
+
+def filter_own_measurements(
+    rows: list[dict], min_weight: float | None = None, max_weight: float | None = None
+) -> tuple[list[dict], list[dict]]:
+    """Отсечь замеры других людей. Возвращает (свои, чужие).
+
+    Домашние весы общие: на них встают члены семьи, а Withings относит замер к
+    владельцу аккаунта, если не распознал профиль. Без фильтра чужой вес попадает
+    в историю владельца и ломает тренды/аналитику. Границы задаёт вызывающий —
+    захардкоженный «нормальный вес» в открытом репозитории смысла не имеет.
+    """
+    if min_weight is None and max_weight is None:
+        return rows, []
+    own, foreign = [], []
+    for r in rows:
+        w = r.get("weight")
+        if (min_weight is not None and w < min_weight) or (max_weight is not None and w > max_weight):
+            foreign.append(r)
+        else:
+            own.append(r)
+    return own, foreign
 
 
 # ── Запись в БД ───────────────────────────────────────────────────────────────
@@ -243,6 +302,69 @@ def upsert_rows(cur, user_id: int, rows: list[dict]) -> tuple[int, int]:
     return inserted, updated
 
 
+# ── Запись через Botkin API (основной путь) ───────────────────────────────────
+# Прод-БД наружу не смотрит, а раздавать доступ к серверу под импорт весов нельзя:
+# группа docker = root на хосте, а psql-суперюзер умеет COPY ... TO PROGRAM. Поэтому
+# пишем по HTTPS в POST /api/agent/log_body_composition: user_id берётся из токена,
+# RLS изолирует данные, доступ к серверу не нужен вообще.
+API_BASE = os.getenv("BOTKIN_API_BASE", "https://botkin.health")
+API_BATCH_LIMIT = 500  # ограничение эндпоинта на длину measurements[]
+
+
+def to_api_measurement(row: dict) -> dict:
+    """Строка парсера → объект measurements[] эндпоинта. Чистая функция.
+
+    measured_at обязан нести офсет — это ключ идемпотентности эндпоинта: naive-время
+    Postgres трактует по session TimeZone, и один момент, присланный то с офсетом то
+    без, дал бы два ряда. parse_measure_groups отдаёт tz-aware UTC, поэтому isoformat
+    даёт «+00:00». visceral_fat не округляем — округление под Integer-колонку делает
+    сервер, здесь дробный индекс информативнее.
+    """
+    m = {"measured_at": row["measured_at"].isoformat(), "weight": row["weight"]}
+    for field in ("body_fat", "muscle_mass", "water", "bone_mass", "visceral_fat"):
+        if row.get(field) is not None:
+            m[field] = row[field]
+    return m
+
+
+def get_agent_jwt(pat: str) -> str:
+    """PAT → короткоживущий агентский JWT (единственный публичный эндпоинт API)."""
+    resp = requests.post(f"{API_BASE}/api/agent/exchange_pat_for_jwt", json={"pat": pat}, timeout=30)
+    if resp.status_code != 200:
+        raise WithingsError(f"обмен PAT не удался: {resp.status_code} {resp.text[:200]}")
+    token = resp.json().get("access_token")
+    if not token:
+        raise WithingsError("в ответе обмена нет access_token")
+    return token
+
+
+def push_via_api(rows: list[dict], source: str = "withings") -> tuple[int, int]:
+    """Отправить замеры в Botkin батчами. Возвращает (inserted, updated).
+
+    PAT берём из env BOTKIN_PAT — в код и репозиторий он не попадает.
+    """
+    pat = os.getenv("BOTKIN_PAT", "")
+    if not pat:
+        raise WithingsError("нет BOTKIN_PAT в .env (personal access token Botkin со scope rw)")
+    jwt = get_agent_jwt(pat)
+
+    inserted = updated = 0
+    for i in range(0, len(rows), API_BATCH_LIMIT):
+        chunk = [to_api_measurement(r) for r in rows[i : i + API_BATCH_LIMIT]]
+        resp = requests.post(
+            f"{API_BASE}/api/agent/log_body_composition",
+            headers={"Authorization": f"Bearer {jwt}"},
+            json={"source": source, "measurements": chunk},
+            timeout=120,
+        )
+        if resp.status_code != 200:
+            raise WithingsError(f"log_body_composition: {resp.status_code} {resp.text[:300]}")
+        body = resp.json()
+        inserted += body.get("inserted", 0)
+        updated += body.get("updated", 0)
+    return inserted, updated
+
+
 def sync_user(user_id: int, days: int = 90, db_url: str | None = None) -> dict:
     """Полный цикл: токен → выборка → апсерт. Возвращает сводку для лога."""
     end_ts = int(time.time())
@@ -265,12 +387,39 @@ def sync_user(user_id: int, days: int = 90, db_url: str | None = None) -> dict:
     return {"user_id": user_id, "rows": len(rows), "inserted": ins, "updated": upd}
 
 
+def _env_float(name: str) -> float | None:
+    """Число из env или None. Мусорное значение не роняет импорт — просто игнорим."""
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning("%s=%r не число — игнорирую", name, raw)
+        return None
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Импорт состава тела Withings → PostgreSQL")
     parser.add_argument("--user", type=int, required=True, help="telegram_id пользователя")
     parser.add_argument("--days", type=int, default=90, help="глубина истории (дней), по умолчанию 90")
     parser.add_argument("--db-url", default=os.getenv("DATABASE_URL"), help="PostgreSQL URL")
     parser.add_argument("--dry-run", action="store_true", help="только показать, без записи в БД")
+    parser.add_argument(
+        "--push-api",
+        action="store_true",
+        help="писать через Botkin API (HTTPS + BOTKIN_PAT) — основной путь, доступ к серверу не нужен",
+    )
+    # Дефолты из .env — чтобы ночной синк не тащил границы через аргументы шелла
+    parser.add_argument(
+        "--min-weight",
+        type=float,
+        default=_env_float("WITHINGS_MIN_WEIGHT"),
+        help="отсечь замеры легче N кг (весы дома общие — на них встают другие члены семьи)",
+    )
+    parser.add_argument(
+        "--max-weight", type=float, default=_env_float("WITHINGS_MAX_WEIGHT"), help="отсечь замеры тяжелее N кг"
+    )
     args = parser.parse_args(argv)
 
     print("⚖️  Withings — импорт веса и состава тела...")
@@ -278,6 +427,12 @@ def main(argv=None):
     start_ts = int((datetime.now(tz=timezone.utc) - timedelta(days=args.days)).timestamp())
     rows = parse_measure_groups(fetch_measure_groups(get_access_token(), start_ts, end_ts))
     print(f"   Замеров получено: {len(rows)} за {args.days} дн.")
+
+    rows, foreign = filter_own_measurements(rows, args.min_weight, args.max_weight)
+    for r in foreign:
+        print(f"   ⏭️  вне коридора веса (не владелец?): {r['measured_at']:%d.%m %H:%M} — {r['weight']} кг")
+    if foreign:
+        print(f"   Отфильтровано чужих замеров: {len(foreign)}")
 
     if args.dry_run:
         for r in rows[-5:]:
@@ -289,6 +444,11 @@ def main(argv=None):
                 f"BMR {r.get('bmr')} ккал"
             )
         print("   (BMR не пишется — колонки в weights нет)")
+        return 0
+
+    if args.push_api:
+        ins, upd = push_via_api(rows)
+        print(f"✅ Готово (Botkin API): {ins} новых, {upd} обновлено")
         return 0
 
     if not args.db_url:

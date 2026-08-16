@@ -54,7 +54,7 @@ def test_parse_measure_groups_maps_all_fields():
     assert row["weight"] == 109.532
     assert row["body_fat"] == 33.214
     assert row["muscle_mass"] == 69.53
-    assert row["water"] == 48.36
+    assert row["water"] == 44.2  # 48.36 кг воды при весе 109.532 → % (см. test_water_converted_kg_to_percent)
     assert row["bone_mass"] == 3.6
     assert row["visceral_fat"] == 6.2
     assert row["bmr"] == 2172
@@ -147,6 +147,98 @@ def test_upsert_rows_counts_updates():
     assert wt.upsert_rows(cur, 1, rows) == (0, 1)
 
 
+# ── путь через Botkin API ─────────────────────────────────────────────────────
+
+
+def _rows_one(extra: dict | None = None):
+    """Одна строка: вес + опционально доп. метрики {meastype: (value, unit)}."""
+    measures = [{"type": 1, "value": 109532, "unit": -3}]
+    measures += [{"type": t, "value": v, "unit": u} for t, (v, u) in (extra or {}).items()]
+    return wt.parse_measure_groups([_grp(1754373000, measures)])
+
+
+def test_water_converted_kg_to_percent():
+    """Регресс: Withings отдаёт воду в КГ, а weights.water и поле API — ПРОЦЕНТЫ."""
+    (row,) = _rows_one({77: (48360, -3)})  # 48.36 кг при весе 109.532
+    assert row["water"] == 44.2
+    assert "hydration_kg" not in row  # сырое поле не утекает дальше
+
+
+def test_to_api_measurement_has_offset_and_optional_fields():
+    (row,) = _rows_one({6: (33214, -3), 170: (62, -1)})
+    m = wt.to_api_measurement(row)
+    assert m["measured_at"].endswith("+00:00")  # ключ идемпотентности эндпоинта
+    assert m["weight"] == 109.532 and m["body_fat"] == 33.214
+    assert m["visceral_fat"] == 6.2  # не округляем — Integer-колонку сузит сервер
+    assert "muscle_mass" not in m  # отсутствующие поля не шлём (None затёр бы COALESCE)
+
+
+def test_push_via_api_batches_and_counts(monkeypatch):
+    monkeypatch.setenv("BOTKIN_PAT", "pat_x")
+    monkeypatch.setattr(wt, "API_BATCH_LIMIT", 2)  # лимит эндпоинта — 500, тут ужимаем
+    monkeypatch.setattr(wt, "get_agent_jwt", lambda pat: "JWT")
+    sent = []
+
+    class _R:
+        status_code = 200
+
+        def json(self):
+            return {"inserted": 2, "updated": 0}
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        sent.append(json)
+        return _R()
+
+    monkeypatch.setattr(wt, "requests", types.SimpleNamespace(post=fake_post))
+    rows = wt.parse_measure_groups(
+        [_grp(1754373000 + i * 600, [{"type": 1, "value": 109000, "unit": -3}]) for i in range(5)]
+    )
+    ins, upd = wt.push_via_api(rows)
+    assert [len(b["measurements"]) for b in sent] == [2, 2, 1]  # батчи по лимиту
+    assert sent[0]["source"] == "withings"
+    assert (ins, upd) == (6, 0)
+
+
+def test_push_via_api_requires_pat(monkeypatch):
+    monkeypatch.delenv("BOTKIN_PAT", raising=False)
+    with pytest.raises(wt.WithingsError, match="BOTKIN_PAT"):
+        wt.push_via_api(_rows_one())
+
+
+def test_push_via_api_raises_on_http_error(monkeypatch):
+    monkeypatch.setenv("BOTKIN_PAT", "pat_x")
+    monkeypatch.setattr(wt, "get_agent_jwt", lambda pat: "JWT")
+
+    class _R:
+        status_code = 422
+        text = "source reserved"
+
+    monkeypatch.setattr(wt, "requests", types.SimpleNamespace(post=lambda *a, **k: _R()))
+    with pytest.raises(wt.WithingsError, match="422"):
+        wt.push_via_api(_rows_one())
+
+
+# ── фильтр чужих замеров (весы общие — дома на них встают другие) ─────────────
+
+
+def test_filter_own_measurements_splits_by_corridor():
+    rows = wt.parse_measure_groups(
+        [
+            _grp(1754373000, [{"type": 1, "value": 108712, "unit": -3}]),  # владелец
+            _grp(1754373600, [{"type": 1, "value": 65991, "unit": -3}]),  # другой человек
+        ]
+    )
+    own, foreign = wt.filter_own_measurements(rows, min_weight=90)
+    assert [r["weight"] for r in own] == [108.712]
+    assert [r["weight"] for r in foreign] == [65.991]
+
+
+def test_filter_own_measurements_noop_without_bounds():
+    rows = _rows_one()
+    own, foreign = wt.filter_own_measurements(rows)
+    assert own == rows and foreign == []
+
+
 # ── токены ────────────────────────────────────────────────────────────────────
 
 
@@ -223,6 +315,54 @@ def test_get_access_token_requires_creds(monkeypatch, tmp_path):
     monkeypatch.delenv("WITHINGS_REFRESH_TOKEN", raising=False)
     with pytest.raises(wt.WithingsError):
         wt.get_access_token()
+
+
+def test_get_access_token_reuses_valid_cached(monkeypatch, tmp_path):
+    """Действующий access_token из общего файла используется без refresh (не ротируем зря)."""
+    import time
+
+    cache = tmp_path / "withings_tokens.json"
+    cache.write_text(json.dumps({"access_token": "LIVE", "refresh_token": "R", "expires_at": time.time() + 3600}))
+    monkeypatch.setattr(wt, "TOKEN_CACHE", cache)
+
+    def boom(*a, **k):
+        raise AssertionError("refresh не должен вызываться при валидном токене")
+
+    monkeypatch.setattr(wt, "requests", types.SimpleNamespace(post=boom))
+    assert wt.get_access_token() == "LIVE"
+
+
+def test_get_access_token_refreshes_when_expired(monkeypatch, tmp_path):
+    """Протухший access_token (буфер 5 мин) → идём в refresh."""
+    import time
+
+    cache = tmp_path / "withings_tokens.json"
+    cache.write_text(json.dumps({"access_token": "OLD", "refresh_token": "R", "expires_at": time.time() + 60}))
+    monkeypatch.setattr(wt, "TOKEN_CACHE", cache)
+    monkeypatch.setenv("WITHINGS_CLIENT_ID", "cid")
+    monkeypatch.setenv("WITHINGS_CLIENT_SECRET", "secret")
+
+    class _Resp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"status": 0, "body": {"access_token": "FRESH", "refresh_token": "R2", "expires_in": 10800}}
+
+    monkeypatch.setattr(wt, "requests", types.SimpleNamespace(post=lambda *a, **k: _Resp()))
+    assert wt.get_access_token() == "FRESH"
+
+
+def test_save_tokens_preserves_foreign_keys(monkeypatch, tmp_path):
+    """Регресс: общий файл с MCP — merge сохраняет чужие ключи (userid), не затирает."""
+    cache = tmp_path / "withings_tokens.json"
+    cache.write_text(json.dumps({"access_token": "OLD", "refresh_token": "R", "userid": 48719916}))
+    monkeypatch.setattr(wt, "TOKEN_CACHE", cache)
+
+    wt._save_tokens({"access_token": "NEW", "refresh_token": "R2", "expires_at": 123})
+    saved = json.loads(cache.read_text())
+    assert saved["access_token"] == "NEW" and saved["refresh_token"] == "R2"
+    assert saved["userid"] == 48719916  # ключ MCP уцелел
 
 
 # ── выборка (пагинация) ───────────────────────────────────────────────────────

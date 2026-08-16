@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>health.botkin.withings-sync</string>
+
+    <!-- Импорт состава тела с весов Withings в Botkin.
+         Мышечная масса, вода, костная масса и висцеральный жир не имеют типов в
+         HealthKit, поэтому через Apple Health/HAE не доходят — этот шаг берёт их
+         напрямую из облака Withings и пишет по HTTPS с PAT (доступ к серверу не нужен).
+         Креды и границы веса — в ~/Projects/Botkin/.env (0600). -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/<you>/Projects/Botkin/.venv/bin/python</string>
+        <string>scripts/import/withings_api.py</string>
+        <string>--user</string>
+        <string>YOUR_TELEGRAM_ID</string>
+        <string>--days</string>
+        <string>7</string>
+        <string>--push-api</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/<you>/Projects/Botkin</string>
+
+    <!-- 10:30 — после утреннего взвешивания (обычно 07:00–08:00 МСК) и после того,
+         как весы успели синхронизироваться с облаком по Wi-Fi. -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>10</integer>
+        <key>Minute</key>
+        <integer>30</integer>
+    </dict>
+
+    <!-- Мак ночью спит: если время запуска пропущено, launchd выполнит задачу
+         сразу после пробуждения. RunAtLoad не ставим — иначе лишний прогон при
+         каждом логине. Импорт идемпотентный, повтор безопасен. -->
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/<you>/Library/Logs/botkin-withings-sync.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/<you>/Library/Logs/botkin-withings-sync.log</string>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>
