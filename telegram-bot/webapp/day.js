@@ -141,12 +141,8 @@
       infoCol = `<div class="budget-info-col">${lines.join('<br>')}</div>`;
     }
 
-    // Adaptive TDEE: maintenance выведен из питания+веса пользователя, а не из
-    // оценки девайса. Подпись — отдельной полосой под шапкой: четвёртая строка
-    // в правой колонке распирала баннер и ломала раскладку на телефоне.
-    const sourceNote = (g.tdee_source === 'adaptive' && g.tdee_days)
-      ? `<div class="budget-source-note">📈 по вашим данным за ${g.tdee_days} дн.</div>`
-      : '';
+    // Источник цели (адаптивный TDEE) в шапку НЕ выводим — деталь живёт в
+    // справке (решение 16.08.2026: любая четвёртая строка ломала раскладку).
 
     banner.innerHTML = `
     <div class="budget-banner-inner">
@@ -155,7 +151,7 @@
         <span class="budget-sub">${subText}</span>
       </div>
       ${infoCol}
-    </div>${sourceNote}`;
+    </div>`;
   }
 
   function renderSlots() {
