@@ -9,9 +9,7 @@ ALTER TABLE users
     ADD COLUMN IF NOT EXISTS height_cm      SMALLINT,
     ADD COLUMN IF NOT EXISTS sex            VARCHAR(10) DEFAULT 'male';
 
--- Seed Alexander Lyskovsky's profile
-UPDATE users
-SET birth_date = '1977-05-15',
-    height_cm  = 170,
-    sex        = 'male'
-WHERE telegram_id = 895655;
+-- Исторически здесь стоял seed биометрии владельца (дата рождения, рост, пол)
+-- с захардкоженным telegram_id. Убрано (#303): ПДн не место в публичном репо,
+-- а этот файл — архив эволюции схемы (см. README), он не накатывается.
+-- Биометрия заполняется пользователем через онбординг/настройки бота.

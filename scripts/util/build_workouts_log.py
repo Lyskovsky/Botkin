@@ -19,8 +19,8 @@ build_workouts_log.py — серверный derived-builder для дашбор
   прямо на сервере, без зависимости от мак-pipeline.
 
 Использование:
-    python3 scripts/util/build_workouts_log.py                  # default user 895655
-    python3 scripts/util/build_workouts_log.py --user-id 12345  # для будущих юзеров
+    BOTKIN_USER_ID=<id> python3 scripts/util/build_workouts_log.py   # владелец из env
+    python3 scripts/util/build_workouts_log.py --user-id 12345       # явный юзер
 
 В sync_all.sh:
     run garmin    /app/scripts/garmin/download_garmin_data.py
@@ -29,9 +29,9 @@ build_workouts_log.py — серверный derived-builder для дашбор
 В /sync в боте: ключ "workouts" в SOURCES (handlers/sync_cmd.py).
 
 Multi-user готовность:
-  Сейчас Garmin тянется только для Александра (telegram_id=895655) и сырые
-  файлы лежат в общем data/garmin/activities/. Когда Андрей/Олег/Игорь
-  подключат свой Garmin — нужно будет разделить хранение на data/garmin/{user_id}/.
+  Сейчас Garmin тянется только для владельца и сырые файлы лежат в общем
+  data/garmin/activities/. Когда свой Garmin подключат другие пользователи —
+  нужно будет разделить хранение на data/garmin/{user_id}/.
   Этот скрипт уже принимает --user-id, чтобы переход был механическим:
   достаточно будет научить parse_workouts.py читать из per-user папки.
 """
@@ -40,14 +40,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from datetime import date, timedelta
 from pathlib import Path
 
-# Дефолт — Александр (единственный сейчас активный Garmin-пользователь).
+# Дефолт — владелец (единственный сейчас активный Garmin-пользователь), из env (#303).
 # Когда подключатся другие — sync_all.sh будет вызывать скрипт по разу на каждого.
-DEFAULT_USER_ID = 895655
+DEFAULT_USER_ID = int(os.getenv("BOTKIN_USER_ID") or os.getenv("HEALTHVAULT_USER_ID") or 0)
 KEEP_DAYS = 180
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent

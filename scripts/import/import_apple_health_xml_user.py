@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
 """
-Импорт Apple Health XML → PostgreSQL для одного пользователя (разовый ручной импорт).
+Импорт Apple Health XML → PostgreSQL для одного пользователя.
 
-Парсит export.xml, агрегирует по дням, генерирует SQL-файл — потом заливается
-на сервер через SSH. Пути и user_id задаются переменными окружения (см. ниже);
-никаких реальных ФИО/ID в самом скрипте — это PII, ей место в приватном конфиге.
+Разовый инструмент: парсит выгрузку `export.xml`, агрегирует по дням, генерирует
+SQL-файл — потом заливается на сервер через SSH.
+
+ФИО и telegram_id пользователя в коде НЕ хардкодятся (#303) — задаются аргументами:
+
+    python3 scripts/import/import_apple_health_xml_user.py \\
+        --user-id <telegram_id> \\
+        --xml /tmp/<dir>/apple_health_export/export.xml \\
+        --out /tmp/apple_health_import.sql
 
 Таблицы:
   - activity_log        (steps, hr, hrv, sleep, distance + raw_data с кольцами/VO2/etc)
@@ -15,12 +21,9 @@
 
 ON CONFLICT DO UPDATE — идемпотентно.
 НЕ трогает других пользователей.
-
-Запуск:
-  IMPORT_USER_ID=<telegram_id> IMPORT_XML=/path/to/export.xml python3 import_nika_apple_health.py
 """
 
-import os
+import argparse
 import defusedxml.ElementTree as ET
 from collections import defaultdict
 from datetime import datetime
@@ -28,9 +31,17 @@ from statistics import mean
 import json
 from pathlib import Path
 
-XML = Path(os.environ.get("IMPORT_XML", "/tmp/apple_health_import/export.xml"))
-OUT_SQL = Path(os.environ.get("IMPORT_OUT_SQL", "/tmp/apple_health_import.sql"))
-USER_ID = int(os.environ["IMPORT_USER_ID"])
+_parser = argparse.ArgumentParser(description="Импорт Apple Health XML одного пользователя в PostgreSQL")
+_parser.add_argument("--user-id", type=int, required=True, help="telegram_id пользователя")
+_parser.add_argument("--xml", type=Path, required=True, help="Путь к export.xml из выгрузки Apple Health")
+_parser.add_argument(
+    "--out", type=Path, default=Path("/tmp/apple_health_import.sql"), help="Куда писать сгенерированный SQL"
+)
+_args = _parser.parse_args()
+
+XML = _args.xml
+OUT_SQL = _args.out
+USER_ID = _args.user_id
 
 # ── Маппинг HKWorkoutActivityType → читаемое название ────────────────────────
 WORKOUT_TYPE_MAP = {
@@ -555,7 +566,7 @@ def jsonb(d: dict) -> str:
 
 
 lines = [
-    f"-- Импорт Apple Health (user_id={USER_ID})",
+    f"-- Импорт Apple Health, user_id={USER_ID}",
     f"-- Сгенерировано: {datetime.now().isoformat()}",
     f"-- Дней activity: {len(all_days)}, весов: {len(weight_records)}, BP: {len(bp_pairs)}, "
     f"тренировок: {len(workout_records)}, менструальных: {len(menstrual_records)}",
@@ -733,7 +744,7 @@ OUT_SQL.write_text("\n".join(lines), encoding="utf-8")
 sql_kb = OUT_SQL.stat().st_size / 1024
 print(f"\n✅ SQL записан: {OUT_SQL} ({sql_kb:.0f} КБ)")
 print("\nСледующий шаг:")
-print(f"  scp {OUT_SQL} root@116.203.213.137:/tmp/nika_import.sql")
+print(f"  scp {OUT_SQL} root@116.203.213.137:/tmp/{OUT_SQL.name}")
 print(
-    "  ssh root@116.203.213.137 'docker exec -i healthvault_postgres psql -U healthvault -d healthvault < /tmp/nika_import.sql'"
+    f"  ssh root@116.203.213.137 'docker exec -i healthvault_postgres psql -U healthvault -d healthvault < /tmp/{OUT_SQL.name}'"
 )

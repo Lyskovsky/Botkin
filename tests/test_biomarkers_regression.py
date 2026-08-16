@@ -10,9 +10,9 @@ from core.health.biomarkers import aggregate_biomarkers
 FAMILY = Path(os.path.expanduser("~/Library/CloudStorage/GoogleDrive-lyskovsky@gmail.com/Мой диск/FamilyHealth"))
 BIO_DIR = Path(__file__).resolve().parent.parent / "telegram-bot"
 
-ALEXANDER = (895655, "Александр Лысковский — Здоровье")
-# Второй тест-юзер: реальные id/папка берутся из env, чтобы не светить PII
-# в публичном репо. Без env тест ниже скипается (папка не найдётся).
+# Оба тест-юзера: реальные id/папка берутся из env, чтобы не светить PII
+# в публичном репо (#303). Без env тесты ниже скипаются (папка не найдётся).
+OWNER = (int(os.getenv("TEST_OWNER_ID", "100000001")), os.getenv("TEST_OWNER_FOLDER", "Test Owner — Здоровье"))
 USER2 = (int(os.getenv("TEST_USER2_ID", "100000002")), os.getenv("TEST_USER2_FOLDER", "Test User 2 — Здоровье"))
 
 
@@ -27,10 +27,10 @@ def _kb_rows(folder: str):
     return rows
 
 
-def test_alexander_golden_nothing_lost():
-    """Александр — единственный golden: зрелый корректный pipeline.
+def test_owner_golden_nothing_lost():
+    """Владелец — единственный golden: зрелый корректный pipeline.
     Новый агрегат обязан содержать каждый старый канонический ключ с тем же value+date."""
-    tid, folder = ALEXANDER
+    tid, folder = OWNER
     old_file = BIO_DIR / f"biomarkers_{tid}.json"
     kb_path = FAMILY / folder / "knowledge_base.json"
     if not old_file.exists() or not kb_path.exists():
@@ -47,7 +47,7 @@ def test_alexander_golden_nothing_lost():
             lost.append(key)
         elif abs(new[key]["value"] - old_rec["value"]) > 1e-6:
             lost.append(f"{key}:value {old_rec['value']}→{new[key]['value']}")
-    assert not lost, f"Александр потерял/изменил маркеры: {lost}"
+    assert not lost, f"Владелец потерял/изменил маркеры: {lost}"
 
 
 def test_user2_smoke_builds_and_units_sane():

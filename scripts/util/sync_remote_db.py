@@ -8,7 +8,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 DB_URL = os.getenv("DATABASE_URL", "postgresql://healthvault:***REMOVED-SECRET***@db:5432/healthvault")
-ALEX_USER_ID = 895655
+# telegram_id владельца — из env, не хардкодом в публичном репо (#303).
+OWNER_USER_ID = int(os.getenv("BOTKIN_USER_ID") or os.getenv("HEALTHVAULT_USER_ID") or 0)
 
 
 class CustomJSONEncoder(json.JSONEncoder):
@@ -27,7 +28,7 @@ def sync_data():
         print("✅ Успешно подключились к удаленной БД")
 
         # 1. Nutrition Log
-        cur.execute("SELECT * FROM nutrition_log WHERE user_id = %s ORDER BY date, meal_time", (ALEX_USER_ID,))
+        cur.execute("SELECT * FROM nutrition_log WHERE user_id = %s ORDER BY date, meal_time", (OWNER_USER_ID,))
         nutrition_records = []
         for row in cur.fetchall():
             nutrition_records.append(dict(row))
@@ -38,7 +39,7 @@ def sync_data():
         print(f"✅ Сохранено {len(nutrition_records)} записей питания")
 
         # 2. Supplements Log
-        cur.execute("SELECT * FROM supplements_log WHERE user_id = %s ORDER BY date, time", (ALEX_USER_ID,))
+        cur.execute("SELECT * FROM supplements_log WHERE user_id = %s ORDER BY date, time", (OWNER_USER_ID,))
         supps_records = []
         for row in cur.fetchall():
             supps_records.append(dict(row))
@@ -53,7 +54,7 @@ def sync_data():
         # делается на стороне дашборда — здесь забираем всё, чтобы не терять записи.
         cur.execute(
             "SELECT * FROM weights WHERE user_id = %s ORDER BY measured_at",
-            (ALEX_USER_ID,),
+            (OWNER_USER_ID,),
         )
         weight_records = []
         for row in cur.fetchall():
@@ -67,7 +68,7 @@ def sync_data():
         # 4. Blood pressure logs — ручные Omron замеры через Apple Health → HAE → сервер
         cur.execute(
             "SELECT * FROM blood_pressure_logs WHERE user_id = %s ORDER BY measured_at",
-            (ALEX_USER_ID,),
+            (OWNER_USER_ID,),
         )
         bp_records = []
         for row in cur.fetchall():
@@ -78,7 +79,7 @@ def sync_data():
         print(f"✅ Сохранено {len(bp_records)} замеров АД (Omron → Apple Health → HAE)")
 
         # 5. Garmin Activity Log + HAE-обогащение (steps, RHR, walking, weight, BP raw_data)
-        cur.execute("SELECT * FROM activity_log WHERE user_id = %s ORDER BY date", (ALEX_USER_ID,))
+        cur.execute("SELECT * FROM activity_log WHERE user_id = %s ORDER BY date", (OWNER_USER_ID,))
         activity_records = []
         for row in cur.fetchall():
             activity_records.append(dict(row))
