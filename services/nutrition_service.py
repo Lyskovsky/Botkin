@@ -66,6 +66,9 @@ class NutritionService:
 
             adaptive = get_adaptive_tdee(self.user_id, as_of=day, db=db)
             adaptive_val = adaptive["tdee"] if adaptive else None
+            # Гаснет, когда цель в итоге посчитана не от adaptive (факт
+            # завершённого дня) — иначе подпись «по вашим данным» лгала бы.
+            adaptive_applied = adaptive_val is not None
             try:
                 avg_stats = get_average_activity_stats(db, self.user_id, days=14)
                 from core.health.caloric_budget import get_day_actual_tdee, get_day_energy_fact
@@ -87,6 +90,7 @@ class NutritionService:
                             today_tdee_final=True,
                             adaptive_tdee=adaptive_val,
                         )
+                        adaptive_applied = False  # факт дня перекрыл adaptive
                     else:
                         data_incomplete = True
                         targets_dict = calculate_targets(stats=avg_stats, user=user, adaptive_tdee=adaptive_val)
@@ -103,8 +107,8 @@ class NutritionService:
                 targets_dict = calculate_targets(stats=None, user=user, adaptive_tdee=adaptive_val)
 
             # Источник TDEE для подписи в UI («по вашим данным за N дней»)
-            targets_dict["tdee_source"] = "adaptive" if adaptive_val else None
-            targets_dict["tdee_days"] = adaptive["days_used"] if adaptive else None
+            targets_dict["tdee_source"] = "adaptive" if adaptive_applied else None
+            targets_dict["tdee_days"] = adaptive["days_used"] if (adaptive and adaptive_applied) else None
 
             # Calculate remaining
             remaining = {

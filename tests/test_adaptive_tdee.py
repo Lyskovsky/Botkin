@@ -308,6 +308,77 @@ def test_get_daily_budget_today_boost_survives_adaptive():
     assert b["bmr_source"] == "adaptive"
 
 
+def test_get_daily_budget_adaptive_keeps_device_activity_avg():
+    """activity_avg — честное девайсовое среднее, а не «адаптивный TDEE − BMR»
+    (HIGH из арх-ревью: 2300−1771=529 — выдуманное число)."""
+    adaptive = {"tdee": 2300, "days_used": 40, "span_days": 27}
+    b = _run_budget(_patched_budget(adaptive))
+    assert b["activity_avg"] == 380  # 2151 − 1771 по девайсу
+    assert b["tdee_avg"] == 2300
+
+
+def test_get_daily_budget_past_day_fact_clears_adaptive_label():
+    """Прошедший день с полным фактом: цель от факта девайса → ярлык не
+    «adaptive» и без tdee_days (HIGH из арх-ревью: противоречивая подпись
+    «от факта дня · по вашим данным за N дн.»)."""
+    adaptive = {"tdee": 2300, "days_used": 40, "span_days": 27}
+    yesterday = datetime.now(timezone.utc).date() - timedelta(days=1)
+    patches = _patched_budget(adaptive) + [
+        patch(
+            "core.health.caloric_budget.get_day_energy_fact",
+            return_value={"tdee": 2400.0, "bmr": 1650.0, "active": 750.0, "incomplete": False},
+        ),
+    ]
+    for p in patches:
+        p.start()
+    try:
+        b = get_daily_budget(user_id=895655, for_date=yesterday)
+    finally:
+        for p in patches:
+            p.stop()
+    assert b["target"] == round(2400 * 0.85)
+    assert b["bmr_source"] != "adaptive"
+    assert b["tdee_days"] is None
+
+
+def test_get_day_stats_past_fact_clears_adaptive_source(test_db, mock_session_local):
+    """/day за прошедший день с полным Garmin-фактом: подпись «по вашим
+    данным» не показывается — цель посчитана от факта, не от adaptive."""
+    from database.crud import create_nutrition_log, create_weight, create_or_update_activity
+    from services.nutrition_service import NutritionService
+
+    uid = 895655
+    yesterday = datetime.now(timezone.utc).date() - timedelta(days=1)
+    for i in range(30):
+        create_nutrition_log(
+            db=test_db,
+            user_id=uid,
+            date=yesterday - timedelta(days=i),
+            meal_time=time(12, 0),
+            meal_name="lunch",
+            items=[],
+            totals={"calories": 1900},
+        )
+    create_weight(test_db, uid, datetime.combine(yesterday - timedelta(days=27), time(8, 0), tzinfo=timezone.utc), 84.0)
+    create_weight(test_db, uid, datetime.combine(yesterday, time(8, 0), tzinfo=timezone.utc), 83.0)
+    create_or_update_activity(
+        db=test_db,
+        user_id=uid,
+        date=yesterday,
+        total_calories=2400,
+        bmr_calories=1650,
+        active_calories=750,
+        source="garmin_connect",
+    )
+
+    with patch("core.infra.tz.get_user_tz", return_value=timezone.utc):
+        stats = NutritionService(user_id=uid).get_day_stats(yesterday)
+
+    assert stats["targets"]["calories"] == round(2400 * 0.85)
+    assert stats["targets"]["tdee_source"] is None
+    assert stats["targets"]["tdee_days"] is None
+
+
 def test_get_daily_budget_falls_back_without_adaptive():
     b = _run_budget(_patched_budget(None))
     assert b["bmr_source"] in ("garmin", "apple_health")

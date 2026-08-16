@@ -180,6 +180,12 @@ def get_daily_budget(
         from core.health.adaptive_tdee import get_adaptive_tdee
 
         tdee_days = None
+        # Девайсовые значения до adaptive-подмены: activity_avg для отображения
+        # обязан оставаться честным девайсовым средним (адаптивный TDEE − BMR —
+        # выдуманное число), а ярлык нужен для отката, если цель прошедшего дня
+        # посчитается от факта девайса.
+        device_source_label = source_label
+        device_total_avg = total_avg
         adaptive = get_adaptive_tdee(user_id, as_of=today, db=db)
         if adaptive:
             total_avg = adaptive["tdee"]
@@ -218,6 +224,11 @@ def get_daily_budget(
             if fact["tdee"] and not fact["incomplete"]:
                 total_burned = fact["tdee"]
                 has_garmin = True
+                if source_label == "adaptive":
+                    # Цель посчитана от факта девайса — подпись «по вашим
+                    # данным за N дней» здесь лгала бы.
+                    source_label = device_source_label or "default"
+                    tdee_days = None
             else:
                 data_incomplete = True
         else:
@@ -236,8 +247,10 @@ def get_daily_budget(
 
         # Activity = total − bmr. Derived (NOT from active_calories field) because
         # Apple Health may overwrite that field, breaking the (total = bmr + active)
-        # invariant. Keeps display math internally consistent.
-        activity_avg = (total_avg - bmr_avg) if (bmr_avg and total_avg) else None
+        # invariant. Keeps display math internally consistent. Считается от
+        # ДЕВАЙСОВОГО среднего (device_total_avg == total_avg, когда adaptive
+        # не применился): «адаптивный TDEE − девайсовый BMR» — выдуманное число.
+        activity_avg = (device_total_avg - bmr_avg) if (bmr_avg and device_total_avg) else None
         if activity_avg is not None and activity_avg < 0:
             activity_avg = 0
         return {

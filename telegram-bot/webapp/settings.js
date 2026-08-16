@@ -301,6 +301,7 @@ function addSupplement() {
 // ── BMR section ─────────────────────────────────────────────────────────────
 const PAL = { sedentary: 1.2, light: 1.375, moderate: 1.55, high: 1.725 };
 const SOURCE_LABEL = {
+  adaptive: 'цель по вашим данным (питание + вес) · БМР с часов',
   garmin: 'из Garmin · обновляется ежедневно по часам',
   apple_health: 'из Apple Health · обновляется ежедневно с часов / телефона',
   manual: 'формула Mifflin-St Jeor по твоим параметрам',
@@ -345,6 +346,10 @@ function populateBmrForm() {
   const av = bmrState.available;
   const r = bmrState.resolved;
   const lines = [];
+  if (r.source === 'adaptive') {
+    const tdee = r.tdee ? ` · ${r.tdee} ккал` : '';
+    lines.push(`<div><strong>Адаптивная оценка</strong> (питание + вес) — ✓ используется${tdee}</div>`);
+  }
   if (av.garmin) {
     const tag = (r.source === 'garmin') ? '✓ используется' : 'доступно';
     lines.push(`<div><strong>Garmin</strong> — ${tag}${r.source === 'garmin' && r.bmr ? ` · ${r.bmr} ккал` : ''}</div>`);
