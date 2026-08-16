@@ -499,6 +499,8 @@ async function loadBotHealth(){
     $('bothealth-kpis').innerHTML = `
       <div class="kpi"><div class="l">Uptime</div><div class="v">${d.uptime_pretty}</div></div>
       <div class="kpi"><div class="l">Ошибок за 24ч</div><div class="v ${d.errors_24h>10?'crit':''}">${d.errors_24h}</div></div>
+      <div class="kpi"><div class="l">Ошибок за 30д</div><div class="v ${d.errors_30d>30?'crit':''}">${d.errors_30d}</div></div>
+      <div class="kpi"><div class="l">Ошибок всего</div><div class="v muted" style="font-size:16px">${d.errors_total}</div><div class="n">с начала лога</div></div>
       <div class="kpi"><div class="l">Сообщений сегодня</div><div class="v">${d.messages_today}</div></div>
       <div class="kpi"><div class="l">Webhook</div><div class="v" style="font-size:14px">${d.webhook_ok?'✓ ok':'✗ down'}</div></div>`;
     const arows = (d.audit_recent||[]).map(e =>
@@ -1028,53 +1030,88 @@ async def api_funnel(days: int = 30, track: Optional[str] = None, _: str = Depen
         db.close()
 
 
+def _process_uptime_seconds() -> int:
+    """Аптайм текущего процесса через /proc — без ps/pgrep (их нет в slim-образе).
+
+    PID 1 в контейнере — это сам `python telegram-bot/bot.py` (in-process
+    архитектура BotkinClaw), поэтому /proc/self всегда указывает на нужный
+    процесс. Формула: btime (эпоха boot, /proc/stat) + starttime процесса
+    (поле 22 /proc/self/stat, в тиках SC_CLK_TCK) → абсолютный старт → uptime.
+    """
+    try:
+        with open("/proc/stat") as f:
+            btime = next(int(line.split()[1]) for line in f if line.startswith("btime"))
+        with open("/proc/self/stat") as f:
+            # Поле 22 (starttime) — после закрывающей ')' у имени процесса, которое
+            # само может содержать пробелы/скобки, поэтому режем от последней ')'.
+            fields = f.read().rsplit(")", 1)[1].split()
+            starttime_ticks = int(fields[19])  # 22-е поле минус первые 3 (pid,comm,state)
+        hz = os.sysconf("SC_CLK_TCK")
+        start_epoch = btime + starttime_ticks / hz
+        return max(0, int(datetime.now(timezone.utc).timestamp() - start_epoch))
+    except Exception:
+        return 0
+
+
+def _count_log_errors(log_path: str) -> dict:
+    """Считает ERROR/CRITICAL-инциденты в bot_debug.log за 24ч/30д/всё время.
+
+    Считаем только строки с собственным timestamp-префиксом и уровнем
+    ERROR/CRITICAL — многострочные traceback-продолжения (без префикса даты)
+    не учитываются отдельно, иначе задваивание (было в старой версии).
+    Лог НЕ ротируется и не чистится намеренно — нужен для разбора инцидентов.
+    """
+    import re
+
+    line_re = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}),\d+ .* - (ERROR|CRITICAL) -")
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    day_ago = now - timedelta(hours=24)
+    month_ago = now - timedelta(days=30)
+    total = h24 = d30 = 0
+    try:
+        with open(log_path, encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                m = line_re.match(line)
+                if not m:
+                    continue
+                total += 1
+                try:
+                    ts = datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S")
+                except ValueError:
+                    continue
+                if ts >= month_ago:
+                    d30 += 1
+                    if ts >= day_ago:
+                        h24 += 1
+    except Exception:
+        pass
+    return {"errors_24h": h24, "errors_30d": d30, "errors_total": total}
+
+
 @router.get("/api/bothealth")
 async def api_bothealth(_: str = Depends(admin_auth)) -> JSONResponse:
     """Минимальная телеметрия бота — не жжёт токены/ресурсы.
 
-    - uptime: длительность процесса bot.py (через /proc или ps в контейнере)
-    - errors_24h: подсчёт ERROR/exception записей в logs/bot_debug.log за 24ч
+    - uptime: аптайм процесса bot.py через /proc (см. _process_uptime_seconds)
+    - errors_24h/30d/total: инциденты ERROR/CRITICAL из logs/bot_debug.log
+      за три периода (см. _count_log_errors); лог не ротируется намеренно
     - messages_today: count из agent_conversations role='user' с today midnight
     - webhook_ok: была ли запись webhook в последние 30 мин (по last_active юзеров)
     - audit_recent: последние 10 событий из audit_log
     """
-    import subprocess
-    from datetime import datetime as _dt, timezone as _tz
-
-    uptime_seconds = 0
+    uptime_seconds = _process_uptime_seconds()
     uptime_pretty = "—"
-    try:
-        # pgrep bot.py — pid → /proc/<pid>/stat → start_time
-        out = subprocess.run(["pgrep", "-f", "bot.py"], capture_output=True, text=True, timeout=5)
-        pid = (out.stdout.strip().split("\n") or [""])[0]
-        if pid:
-            # uptime через ps etime (надёжнее ручного парсинга /proc/<pid>/stat)
-            etime = subprocess.run(
-                ["ps", "-o", "etimes=", "-p", pid], capture_output=True, text=True, timeout=3
-            ).stdout.strip()
-            uptime_seconds = int(etime) if etime.isdigit() else 0
-            if uptime_seconds > 0:
-                d, rem = divmod(uptime_seconds, 86400)
-                h, rem = divmod(rem, 3600)
-                m = rem // 60
-                uptime_pretty = (f"{d}д " if d else "") + (f"{h}ч " if h else "") + f"{m}м"
-    except Exception:
-        pass
+    if uptime_seconds > 0:
+        d, rem = divmod(uptime_seconds, 86400)
+        h, rem = divmod(rem, 3600)
+        m = rem // 60
+        uptime_pretty = (f"{d}д " if d else "") + (f"{h}ч " if h else "") + f"{m}м"
 
-    errors_24h = 0
-    try:
-        log_path = "/app/logs/bot_debug.log"
-        # tail последние ~2000 строк, посчитать ERROR/CRITICAL
-        out = subprocess.run(
-            ["grep", "-cE", "ERROR|CRITICAL|Traceback", log_path], capture_output=True, text=True, timeout=3
-        )
-        errors_24h = int(out.stdout.strip()) if out.stdout.strip().isdigit() else 0
-    except Exception:
-        pass
+    error_counts = _count_log_errors("/app/logs/bot_debug.log")
 
     db = SessionLocal()
     try:
-        midnight = _dt.now(_tz.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+        midnight = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
         messages_today = (
             db.execute(
                 text("SELECT COUNT(*) FROM agent_conversations WHERE role='user' AND created_at >= :m"),
@@ -1114,7 +1151,7 @@ async def api_bothealth(_: str = Depends(admin_auth)) -> JSONResponse:
         {
             "uptime_seconds": uptime_seconds,
             "uptime_pretty": uptime_pretty,
-            "errors_24h": errors_24h,
+            **error_counts,  # errors_24h / errors_30d / errors_total
             "messages_today": messages_today,
             "webhook_ok": webhook_ok,
             "audit_recent": audit_recent,
