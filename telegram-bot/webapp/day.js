@@ -137,6 +137,12 @@
         else if (goalPct > 0) lines.push(`🎯 +${goalPct}% профицит`);
         else lines.push(`🎯 поддержание`);
       }
+
+      // Adaptive TDEE: maintenance выведен из питания+веса пользователя,
+      // а не из оценки девайса — подписываем источник.
+      if (g.tdee_source === 'adaptive' && g.tdee_days) {
+        lines.push(`<span class="bmr-today-hint">📈 по вашим данным за ${g.tdee_days} дн.</span>`);
+      }
       infoCol = `<div class="budget-info-col">${lines.join('<br>')}</div>`;
     }
 

@@ -172,6 +172,26 @@ def get_daily_budget(
                 bmr_avg = round(avg_stats.get("bmr_calories", 0))
                 total_avg = round(avg_stats.get("total_calories", 0))
 
+        # ── Adaptive TDEE (питание + вес, метод MacroFactor) ────────────────────
+        # Самый честный источник maintenance: закрывает энергобаланс по факту
+        # съеденного и динамике веса. Приоритетнее девайсов и manual — но
+        # включается только при достатке данных (≥21 день лога, ≥2 взвешивания
+        # с разбросом ≥14 дней), иначе None и остаёмся на цепочке выше.
+        from core.health.adaptive_tdee import get_adaptive_tdee
+
+        tdee_days = None
+        # Девайсовые значения до adaptive-подмены: activity_avg для отображения
+        # обязан оставаться честным девайсовым средним (адаптивный TDEE − BMR —
+        # выдуманное число), а ярлык нужен для отката, если цель прошедшего дня
+        # посчитается от факта девайса.
+        device_source_label = source_label
+        device_total_avg = total_avg
+        adaptive = get_adaptive_tdee(user_id, as_of=today, db=db)
+        if adaptive:
+            total_avg = adaptive["tdee"]
+            source_label = "adaptive"
+            tdee_days = adaptive["days_used"]
+
         # ── Default fallback (no wearable, no manual setup) ─────────────────────
         if not total_avg:
             total_burned = DEFAULT_TOTAL
@@ -179,7 +199,7 @@ def get_daily_budget(
             has_garmin = False
         else:
             total_burned = total_avg
-            has_garmin = source_label in ("garmin", "apple_health")
+            has_garmin = source_label in ("garmin", "apple_health", "adaptive")
 
         if calorie_goal_pct is None:
             calorie_goal_pct = s.calorie_goal_pct if s and s.calorie_goal_pct is not None else DEFAULT_GOAL_PCT
@@ -204,6 +224,11 @@ def get_daily_budget(
             if fact["tdee"] and not fact["incomplete"]:
                 total_burned = fact["tdee"]
                 has_garmin = True
+                if source_label == "adaptive":
+                    # Цель посчитана от факта девайса — подпись «по вашим
+                    # данным за N дней» здесь лгала бы.
+                    source_label = device_source_label or "default"
+                    tdee_days = None
             else:
                 data_incomplete = True
         else:
@@ -222,8 +247,10 @@ def get_daily_budget(
 
         # Activity = total − bmr. Derived (NOT from active_calories field) because
         # Apple Health may overwrite that field, breaking the (total = bmr + active)
-        # invariant. Keeps display math internally consistent.
-        activity_avg = (total_avg - bmr_avg) if (bmr_avg and total_avg) else None
+        # invariant. Keeps display math internally consistent. Считается от
+        # ДЕВАЙСОВОГО среднего (device_total_avg == total_avg, когда adaptive
+        # не применился): «адаптивный TDEE − девайсовый BMR» — выдуманное число.
+        activity_avg = (device_total_avg - bmr_avg) if (bmr_avg and device_total_avg) else None
         if activity_avg is not None and activity_avg < 0:
             activity_avg = 0
         return {
@@ -236,7 +263,10 @@ def get_daily_budget(
             "bmr_avg": bmr_avg,
             "activity_avg": activity_avg,
             "tdee_avg": total_avg,
-            "bmr_source": source_label,  # 'garmin' | 'apple_health' | 'manual' | 'default'
+            "bmr_source": source_label,  # 'adaptive' | 'garmin' | 'apple_health' | 'manual' | 'default'
+            # Сколько полных дней лога питания легло в адаптивную оценку
+            # (для подписи «по вашим данным за N дней»); None для других источников.
+            "tdee_days": tdee_days,
             "calorie_goal_pct": calorie_goal_pct,
             # True для прошедшего дня с битым/частичным синком Garmin: цель — оценка
             # по среднему, вердикт «перебор» показывать нельзя.
