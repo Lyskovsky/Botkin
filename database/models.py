@@ -705,6 +705,48 @@ class CgmConnection(Base):
     )
 
 
+class CgmFollower(Base):
+    """Креды follower-аккаунта LibreLinkUp, введённые самим пользователем (#381).
+
+    Зачем отдельная таблица, а не колонки в cgm_connections: приглашение follower'а
+    в LibreLinkUp работает только ВНУТРИ региона (ограничение Abbott), поэтому на
+    каждый регион нужен свой аккаунт, а один такой аккаунт может наблюдать сразу
+    несколько пациентов — связь «один follower → много patient_id».
+
+    Пароль хранится ТОЛЬКО зашифрованным (core.infra.secrets.encrypt_secret);
+    имя колонки password_enc об этом и говорит. Ключ живёт в env SECRETS_KEY,
+    то есть на другом носителе, чем БД.
+    """
+
+    __tablename__ = "cgm_followers"
+
+    # BigInteger PK; на sqlite (тесты) рендерим как Integer — иначе не автоинкрементит.
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer(), "sqlite"), primary_key=True, autoincrement=True
+    )
+    owner_user_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("users.telegram_id", ondelete="CASCADE"), nullable=False
+    )
+    region: Mapped[str] = mapped_column(String(8), nullable=False)
+    email: Mapped[str] = mapped_column(String(255), nullable=False)
+    password_enc: Mapped[str] = mapped_column(Text, nullable=False)
+    label: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    created_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=True
+    )
+    # Диагностика: когда последний раз логин прошёл и чем упал последний неудачный.
+    last_ok_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Отзыв без удаления строки — симметрично PersonalAccessToken.revoked_at.
+    revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("region", "email", name="cgm_followers_region_email_key"),
+        Index("idx_cgm_followers_region", "region"),
+        Index("idx_cgm_followers_owner", "owner_user_id"),
+    )
+
+
 class GlucoseReading(Base):
     """Точки глюкозы CGM (Abbott FreeStyle Libre 3 → LibreLinkUp API, #96)."""
 

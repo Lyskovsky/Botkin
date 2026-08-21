@@ -57,6 +57,10 @@ class PatRevokeCallback(CallbackData, prefix="patrev"):
     token_id: int
 
 
+class CgmFollowerRevokeCallback(CallbackData, prefix="cgmfolrev"):
+    follower_id: int
+
+
 # ── Чистая логика (тестируется без Telegram) ──────────────────────────────────
 
 
@@ -90,6 +94,19 @@ def format_connections(pats: list[dict]) -> str:
         kind = "чтение+запись" if p.get("scope") == "rw" else "только чтение"
         used = p["last_used_at"].strftime("%d.%m.%Y") if p.get("last_used_at") else "ещё не использовался"
         lines.append(f"• {name} — {kind}; последнее использование: {used}")
+    return "\n".join(lines)
+
+
+def format_cgm_followers(followers: list[dict]) -> str:
+    """Текст списка follower-аккаунтов CGM. Пароль не показываем никогда —
+    ни целиком, ни маской: сравнивать его глазами всё равно незачем."""
+    lines = ["🩸 Твои CGM-аккаунты (LibreLinkUp):\n"]
+    for f in followers:
+        ok = f["last_ok_at"].strftime("%d.%m.%Y") if f.get("last_ok_at") else "ещё не логинился"
+        line = f"• {f.get('email')} ({f.get('region')}) — последний успешный вход: {ok}"
+        if f.get("last_error"):
+            line += f"; последняя ошибка: {f['last_error'][:60]}"
+        lines.append(line)
     return "\n".join(lines)
 
 
@@ -135,6 +152,46 @@ def _revoke_pat(telegram_id: int, token_id: int) -> bool:
         return revoke_pat(db, telegram_id, token_id)
     except Exception as e:
         logger.error(f"connect_mcp: не смог отозвать PAT {token_id} у {telegram_id}: {e}")
+        return False
+    finally:
+        db.close()
+
+
+def _list_cgm_followers(telegram_id: int) -> list[dict]:
+    from database import SessionLocal
+    from database.crud import list_cgm_followers
+
+    db = SessionLocal()
+    try:
+        # Поля читаем внутри сессии; password_enc наружу не отдаём вовсе.
+        return [
+            {
+                "id": f.id,
+                "region": f.region,
+                "email": f.email,
+                "last_ok_at": f.last_ok_at,
+                "last_error": f.last_error,
+            }
+            for f in list_cgm_followers(db, telegram_id)
+        ]
+    except Exception as e:
+        # Таблицы может ещё не быть (миграция не накатана) — /my_connections
+        # обязан продолжать показывать MCP-токены.
+        logger.warning(f"my_connections: не смог прочитать cgm_followers: {e}")
+        return []
+    finally:
+        db.close()
+
+
+def _revoke_cgm_follower(telegram_id: int, follower_id: int) -> bool:
+    from database import SessionLocal
+    from database.crud import revoke_cgm_follower
+
+    db = SessionLocal()
+    try:
+        return revoke_cgm_follower(db, telegram_id, follower_id)
+    except Exception as e:
+        logger.error(f"my_connections: не смог отозвать follower {follower_id} у {telegram_id}: {e}")
         return False
     finally:
         db.close()
@@ -206,8 +263,12 @@ async def on_pat_scope_chosen(callback: CallbackQuery, callback_data: PatNewCall
 async def cmd_my_connections(message: Message) -> None:
     """`/my_connections` — список активных токенов + кнопки отзыва."""
     pats = _list_pats(message.from_user.id)
+    followers = _list_cgm_followers(message.from_user.id)
+    if not pats and not followers:
+        await message.answer("У тебя пока нет активных подключений.\nMCP — /connect_mcp, глюкоза — /connect_cgm")
+        return
     if not pats:
-        await message.answer("У тебя пока нет активных MCP-подключений.\nСоздать — /connect_mcp")
+        await _answer_followers(message, followers)
         return
 
     keyboard = InlineKeyboardMarkup(
@@ -222,6 +283,36 @@ async def cmd_my_connections(message: Message) -> None:
         ]
     )
     await message.answer(format_connections(pats), reply_markup=keyboard)
+    if followers:
+        await _answer_followers(message, followers)
+
+
+async def _answer_followers(message: Message, followers: list[dict]) -> None:
+    """Отдельным сообщением: CGM-аккаунты и кнопки отзыва (симметрично PAT)."""
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=f"❌ Отозвать: {f['email']} ({f['region']})",
+                    callback_data=CgmFollowerRevokeCallback(follower_id=f["id"]).pack(),
+                )
+            ]
+            for f in followers
+        ]
+    )
+    await message.answer(format_cgm_followers(followers), reply_markup=keyboard)
+
+
+@router.callback_query(CgmFollowerRevokeCallback.filter())
+async def on_cgm_follower_revoke(callback: CallbackQuery, callback_data: CgmFollowerRevokeCallback) -> None:
+    if _revoke_cgm_follower(callback.from_user.id, callback_data.follower_id):
+        await callback.answer("Аккаунт отозван")
+        await callback.message.edit_text(
+            "✅ CGM-аккаунт отозван — импорт глюкозы по нему прекратится со следующего синка.\n\n"
+            "Список — /my_connections"
+        )
+    else:
+        await callback.answer("Аккаунт уже отозван или не найден", show_alert=True)
 
 
 @router.callback_query(PatRevokeCallback.filter())

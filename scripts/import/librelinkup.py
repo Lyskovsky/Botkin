@@ -36,6 +36,7 @@ from dotenv import load_dotenv
 logger = logging.getLogger(__name__)
 
 ROOT = Path(__file__).resolve().parent.parent.parent
+sys.path.insert(0, str(ROOT))  # для core.infra.secrets (расшифровка кред из cgm_followers)
 load_dotenv(ROOT / ".env")
 
 # Коэффициент пересчёта mg/dL → mmol/L (молярная масса глюкозы 180.16).
@@ -365,7 +366,14 @@ _extra_fail_count: dict[str, int] = {}
 _extra_lock = threading.Lock()
 
 
-def _extra_followers() -> list[dict]:
+def _mask_email(email: str) -> str:
+    """`a***@icloud.com` — для логов: диагностика нужна, а чужой email в логах нет."""
+    local, _, domain = (email or "").partition("@")
+    head = local[:1] if local else "?"
+    return f"{head}***@{domain}" if domain else f"{head}***"
+
+
+def _followers_from_env() -> list[dict]:
     """Доп. followers из env LLU_FOLLOWERS (JSON). [] если не задан/битый.
 
     Нормализует region в UPPER; пропускает записи без email/password. Битый JSON —
@@ -383,6 +391,104 @@ def _extra_followers() -> list[dict]:
     for f in data if isinstance(data, list) else []:
         if isinstance(f, dict) and f.get("email") and f.get("password"):
             out.append({"region": str(f.get("region") or "EU").upper(), "email": f["email"], "password": f["password"]})
+    return out
+
+
+def _followers_from_db(db_url: str | None = None) -> list[dict]:
+    """Активные followers из таблицы cgm_followers; пароль расшифровывается на месте.
+
+    Деградирует к [] при ЛЮБОЙ проблеме — нет DATABASE_URL (например --dry-run),
+    таблицы ещё нет (миграция не накатана), не задан SECRETS_KEY, не установлена
+    cryptography. Env-путь обязан продолжать работать сам: иначе один
+    недокрученный деплой остановил бы импорт глюкозы у всех сразу.
+    """
+    try:
+        from core.infra.secrets import decrypt_secret
+    except ImportError as e:
+        logger.warning("расшифровка недоступна (%s) — followers из БД пропущены", e)
+        return []
+
+    db_url = db_url or os.getenv("DATABASE_URL")
+    if not db_url:
+        return []
+    try:
+        conn = psycopg2.connect(db_url)
+    except Exception as e:
+        logger.warning("cgm_followers: нет соединения с БД (%s) — работаю по LLU_FOLLOWERS", e)
+        return []
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT region, email, password_enc FROM cgm_followers WHERE revoked_at IS NULL ORDER BY id")
+            raw = cur.fetchall()
+    except Exception as e:
+        logger.warning("cgm_followers не прочитана (%s) — работаю по LLU_FOLLOWERS", e)
+        return []
+    finally:
+        conn.close()
+
+    out: list[dict] = []
+    for region, email, password_enc in raw:
+        try:
+            password = decrypt_secret(password_enc)
+        except Exception as e:
+            # Чаще всего это чужой/сменённый SECRETS_KEY. Пропускаем именно эту
+            # запись, остальные followers должны работать.
+            logger.warning(
+                "follower[%s] %s: пароль не расшифровался (%s) — пропуск",
+                region,
+                _mask_email(email),
+                e,
+            )
+            continue
+        out.append({"region": str(region or "EU").upper(), "email": email, "password": password})
+    return out
+
+
+def _extra_followers() -> list[dict]:
+    """Доп. followers: сначала БД (cgm_followers), затем env LLU_FOLLOWERS.
+
+    БД — источник истины: креды заводит сам пользователь через /connect_cgm. Env
+    остаётся для локальной отладки и bootstrap первого аккаунта в новом регионе.
+
+    Дедуп по (region, email): один и тот же аккаунт из двух источников логинился
+    бы дважды, а лишние логины одним email — прямой путь к Cloudflare-бану 476
+    (см. #135/#139/#141).
+    """
+    out: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for f in (*_followers_from_db(), *_followers_from_env()):
+        key = (f["region"], str(f["email"]).strip().lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(f)
+    return out
+
+
+def available_regions() -> list[str]:
+    """Регионы, которые понимает pylibrelinkup (для клавиатуры выбора в боте)."""
+    from pylibrelinkup import APIUrl
+
+    return [e.name for e in APIUrl]
+
+
+def validate_follower(region: str, email: str, password: str) -> list[dict]:
+    """Проверить креды follower-аккаунта и вернуть видимых им пациентов.
+
+    Возвращает [{"patient_id": …, "name": …}]. Бросает исключение при неудачном
+    логине — его текст показываем пользователю как причину.
+
+    ВАЖНО: это отдельный путь от `_get_extra_client()` — он сознательно НЕ трогает
+    ни token-cache региона, ни его backoff. Иначе опечатка пользователя в
+    /connect_cgm ставила бы весь регион на cooldown и останавливала ночной sync
+    уже работающего follower'а в этом же регионе.
+    """
+    client = _new_client({"region": (region or "EU").strip().upper(), "email": email, "password": password})
+    client.authenticate()
+    out: list[dict] = []
+    for pat in client.get_patients():
+        name = " ".join(x for x in (getattr(pat, "first_name", None), getattr(pat, "last_name", None)) if x).strip()
+        out.append({"patient_id": str(pat.patient_id), "name": name or "(без имени)"})
     return out
 
 

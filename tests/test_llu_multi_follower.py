@@ -14,35 +14,113 @@ llu = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(llu)
 
 
-# ── _extra_followers: парсинг env ─────────────────────────────────────────────
+# ── _followers_from_env: парсинг env ─────────────────────────────────────────────
 
 
-def test_extra_followers_unset(monkeypatch):
+def test_followers_from_env_unset(monkeypatch):
     monkeypatch.delenv("LLU_FOLLOWERS", raising=False)
-    assert llu._extra_followers() == []
+    assert llu._followers_from_env() == []
 
 
-def test_extra_followers_parses_and_normalizes(monkeypatch):
+def test_followers_from_env_parses_and_normalizes(monkeypatch):
     monkeypatch.setenv(
         "LLU_FOLLOWERS",
         '[{"region":"ru","email":"a@x","password":"p"},'
         '{"email":"b@x","password":"q"},'
         '{"region":"US","email":"","password":"z"}]',
     )
-    assert llu._extra_followers() == [
+    assert llu._followers_from_env() == [
         {"region": "RU", "email": "a@x", "password": "p"},
         {"region": "EU", "email": "b@x", "password": "q"},  # region по умолчанию EU
     ]  # запись без email отброшена
 
 
-def test_extra_followers_malformed_json(monkeypatch):
+def test_followers_from_env_malformed_json(monkeypatch):
     monkeypatch.setenv("LLU_FOLLOWERS", "{not json")
-    assert llu._extra_followers() == []  # не падаем, деградируем к []
+    assert llu._followers_from_env() == []  # не падаем, деградируем к []
 
 
-def test_extra_followers_not_a_list(monkeypatch):
+def test_followers_from_env_not_a_list(monkeypatch):
     monkeypatch.setenv("LLU_FOLLOWERS", '{"region":"RU","email":"a@x","password":"p"}')
-    assert llu._extra_followers() == []  # объект вместо списка → игнор
+    assert llu._followers_from_env() == []  # объект вместо списка → игнор
+
+
+# ── _extra_followers: БД + env, дедуп ─────────────────────────────────────────
+
+
+def test_extra_followers_db_first_then_env(monkeypatch):
+    """Порядок источников: сначала БД, потом env — БД источник истины."""
+    monkeypatch.setattr(llu, "_followers_from_db", lambda: [{"region": "RU", "email": "db@x", "password": "p1"}])
+    monkeypatch.setattr(llu, "_followers_from_env", lambda: [{"region": "EU", "email": "env@x", "password": "p2"}])
+    assert [f["email"] for f in llu._extra_followers()] == ["db@x", "env@x"]
+
+
+def test_extra_followers_dedups_same_account(monkeypatch):
+    """Один аккаунт в БД и в env = один логин: лишние логины ловят 476."""
+    monkeypatch.setattr(llu, "_followers_from_db", lambda: [{"region": "RU", "email": "a@x", "password": "from-db"}])
+    monkeypatch.setattr(llu, "_followers_from_env", lambda: [{"region": "RU", "email": "A@X ", "password": "from-env"}])
+    got = llu._extra_followers()
+    assert len(got) == 1
+    assert got[0]["password"] == "from-db"  # БД выигрывает
+
+
+def test_extra_followers_same_email_other_region_kept(monkeypatch):
+    """Тот же email в другом регионе — отдельный аккаунт, не дубль."""
+    monkeypatch.setattr(llu, "_followers_from_db", lambda: [{"region": "RU", "email": "a@x", "password": "p"}])
+    monkeypatch.setattr(llu, "_followers_from_env", lambda: [{"region": "EU", "email": "a@x", "password": "p"}])
+    assert len(llu._extra_followers()) == 2
+
+
+def test_followers_from_db_no_database_url(monkeypatch):
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    assert llu._followers_from_db() == []
+
+
+def test_followers_from_db_connect_error_degrades(monkeypatch):
+    """БД недоступна → [] и работа по env, а не падение импортёра."""
+
+    def boom(*a, **kw):
+        raise RuntimeError("could not connect")
+
+    monkeypatch.setattr(llu.psycopg2, "connect", boom)
+    assert llu._followers_from_db("postgresql://nope/nope") == []
+
+
+def test_followers_from_db_decrypts_and_skips_broken(monkeypatch):
+    """Расшифровка на месте; неразбираемая запись пропускается, остальные живут."""
+    from core.infra.secrets import encrypt_secret
+
+    good = encrypt_secret("real-password")
+    rows = [("ru", "ok@x", good), ("EU", "bad@x", "v1:not-a-real-token")]
+
+    class _Cur:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def execute(self, *a):
+            pass
+
+        def fetchall(self):
+            return rows
+
+    class _Conn:
+        def cursor(self):
+            return _Cur()
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(llu.psycopg2, "connect", lambda *a, **kw: _Conn())
+    got = llu._followers_from_db("postgresql://x/y")
+    assert got == [{"region": "RU", "email": "ok@x", "password": "real-password"}]
+
+
+def test_mask_email_hides_local_part():
+    assert llu._mask_email("pohodnyalla@icloud.com") == "p***@icloud.com"
+    assert "@" not in llu._mask_email("nodomain")
 
 
 # ── _resolve_api_url ──────────────────────────────────────────────────────────

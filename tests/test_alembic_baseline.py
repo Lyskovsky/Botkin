@@ -23,6 +23,7 @@ EXPECTED_TABLES = {
     "blood_tests",
     "body_measurements",
     "cgm_connections",
+    "cgm_followers",
     "daily_summaries",
     "glucose_readings",
     "llm_usage_log",
@@ -42,7 +43,7 @@ EXPECTED_TABLES = {
 }
 
 # Актуальный head миграций. Обновляется при каждой новой ревизии.
-HEAD_REVISION = "meal0remind01"
+HEAD_REVISION = "cgmfol0self01"
 
 
 def _alembic_config() -> Config:
