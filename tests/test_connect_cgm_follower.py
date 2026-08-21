@@ -402,3 +402,51 @@ async def test_lost_region_does_not_fall_back_to_eu(monkeypatch):
 
     net.assert_not_called()
     assert "начни заново" in msg.answer.await_args.args[0].lower()
+
+
+# ── привязка: своя vs чужая (живой прогон 21.08.2026) ────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_bind_existing_own_mapping_says_already_yours(monkeypatch):
+    """Сенсор уже привязан к ЭТОМУ пользователю — не пугаем «другим профилем»."""
+    monkeypatch.setattr(h, "_save_mapping", lambda pid, tid: False)
+    monkeypatch.setattr(h, "_mapping_owner", lambda pid: UID)
+    cb = MagicMock()
+    cb.from_user.id = UID
+    cb.message, _ = _message()
+    cb.answer = AsyncMock()
+
+    await h.on_bind(cb, h.CgmBindCallback(patient_id="p1"))
+
+    text = cb.message.answer.await_args.args[0].lower()
+    assert "твоему профилю" in text and "другому профилю" not in text
+
+
+@pytest.mark.asyncio
+async def test_bind_foreign_mapping_still_warns(monkeypatch):
+    monkeypatch.setattr(h, "_save_mapping", lambda pid, tid: False)
+    monkeypatch.setattr(h, "_mapping_owner", lambda pid: 111111)
+    cb = MagicMock()
+    cb.from_user.id = UID
+    cb.message, _ = _message()
+    cb.answer = AsyncMock()
+
+    await h.on_bind(cb, h.CgmBindCallback(patient_id="p1"))
+
+    assert "другому профилю" in cb.message.answer.await_args.args[0].lower()
+
+
+@pytest.mark.asyncio
+async def test_bind_unknown_owner_falls_back_to_warning(monkeypatch):
+    """Владельца определить не удалось — осторожная формулировка, а не «всё ок»."""
+    monkeypatch.setattr(h, "_save_mapping", lambda pid, tid: False)
+    monkeypatch.setattr(h, "_mapping_owner", lambda pid: None)
+    cb = MagicMock()
+    cb.from_user.id = UID
+    cb.message, _ = _message()
+    cb.answer = AsyncMock()
+
+    await h.on_bind(cb, h.CgmBindCallback(patient_id="p1"))
+
+    assert "другому профилю" in cb.message.answer.await_args.args[0].lower()
