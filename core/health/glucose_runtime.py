@@ -30,5 +30,9 @@ get_cached_client = _llu.get_cached_client
 fetch_patient_ids = _llu.fetch_patient_ids
 refresh_glucose_for_telegram = _llu.refresh_glucose_for_telegram
 LoginOnCooldownError = _llu.LoginOnCooldownError
+# Самообслуживание follower-аккаунтов (#381): валидация кред до записи в БД
+# и список регионов для клавиатуры выбора.
+validate_follower = _llu.validate_follower
+available_regions = _llu.available_regions
 
 __all__ = ["get_cached_client", "fetch_patient_ids", "refresh_glucose_for_telegram", "LoginOnCooldownError"]
