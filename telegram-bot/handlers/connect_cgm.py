@@ -24,6 +24,7 @@ patient_id (из cgm_connections) исключаются из кандидато
 import asyncio
 import logging
 import re
+import time
 
 from aiogram import Router
 from aiogram.filters import Command, StateFilter
@@ -187,6 +188,44 @@ _REGION_ORDER = ("RU", "EU", "EU2", "US", "DE", "FR", "AE", "AP", "AU", "CA", "J
 
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]{2,}$")
 
+# Неудачные попытки логина на пользователя. Ограничение нужно не от злоумышленника
+# (человек вводит пароль к своему же аккаунту), а от Abbott: на серию неудачных
+# логинов Cloudflare отвечает баном 476 на ВЕСЬ регион (#135/#139/#141) — встанут
+# и чужие followers того же региона. Бот однопроцессный, dict в памяти достаточно.
+_MAX_LOGIN_ATTEMPTS = 5
+_ATTEMPT_WINDOW_SEC = 900  # 15 минут
+_MAX_TRACKED_USERS = 500
+_login_attempts: dict[int, list[float]] = {}
+
+
+def _now() -> float:
+    return time.monotonic()
+
+
+def attempts_left(user_id: int, now: float | None = None) -> int:
+    """Сколько неудачных попыток ещё доступно пользователю в текущем окне."""
+    now = _now() if now is None else now
+    fresh = [ts for ts in _login_attempts.get(user_id, []) if now - ts < _ATTEMPT_WINDOW_SEC]
+    return max(0, _MAX_LOGIN_ATTEMPTS - len(fresh))
+
+
+def register_failed_attempt(user_id: int, now: float | None = None) -> int:
+    """Зафиксировать неудачный логин. Возвращает остаток попыток."""
+    now = _now() if now is None else now
+    fresh = [ts for ts in _login_attempts.get(user_id, []) if now - ts < _ATTEMPT_WINDOW_SEC]
+    fresh.append(now)
+    _login_attempts[user_id] = fresh
+    if len(_login_attempts) > _MAX_TRACKED_USERS:
+        # Подчищаем тех, у кого окно давно истекло, чтобы dict не рос вечно.
+        for uid in [u for u, ts in _login_attempts.items() if not ts or now - ts[-1] > _ATTEMPT_WINDOW_SEC]:
+            _login_attempts.pop(uid, None)
+    return max(0, _MAX_LOGIN_ATTEMPTS - len(fresh))
+
+
+def clear_failed_attempts(user_id: int) -> None:
+    """Успешный логин обнуляет счётчик."""
+    _login_attempts.pop(user_id, None)
+
 
 # ── Чистая логика (тестируется без Telegram) ──────────────────────────────────
 
@@ -300,7 +339,9 @@ def _save_follower(telegram_id: int, region: str, email: str, password: str) -> 
 
     db = SessionLocal()
     try:
-        create_cgm_follower(db, telegram_id, region=region, email=email, password=password)
+        # login_ok: логин уже проверен живьём выше, поэтому сразу ставим last_ok_at —
+        # иначе /my_connections покажет «ещё не логинился» у рабочего аккаунта.
+        create_cgm_follower(db, telegram_id, region=region, email=email, password=password, login_ok=True)
         return True, ""
     except ValueError as e:
         return False, str(e)
@@ -386,7 +427,7 @@ async def step_password(message: Message, state: FSMContext) -> None:
         await message.answer("⚠️ Не смог удалить твоё сообщение с паролем — удали его сам, пожалуйста.")
 
     data = await state.get_data()
-    region = (data.get("region") or "EU").upper()
+    region = (data.get("region") or "").upper()
     email = data.get("email") or ""
     # Состояние чистим сразу: пароль в FSM-хранилище не кладём вообще, а email и
     # регион дальше не нужны — всё, что нужно, уже в локальных переменных.
@@ -395,8 +436,17 @@ async def step_password(message: Message, state: FSMContext) -> None:
     if not password.strip():
         await message.answer("Пустой пароль — начни заново: /connect_cgm")
         return
-    if not email:
-        await message.answer("Потерял email из диалога — начни заново: /connect_cgm")
+    # Регион и email проверяем одинаково: молчаливый фолбэк региона на EU привёл бы
+    # к логину не в тот регион и невнятной ошибке «неверный пароль».
+    if not email or not region:
+        await message.answer("Потерял данные диалога — начни заново: /connect_cgm")
+        return
+
+    if attempts_left(message.from_user.id) <= 0:
+        await message.answer(
+            f"⏳ Слишком много неудачных попыток. Подожди {_ATTEMPT_WINDOW_SEC // 60} минут: "
+            "Abbott банит частые логины на весь регион, и тогда встанет уже работающий сбор данных."
+        )
         return
 
     status = await message.answer("Проверяю логин…")
@@ -407,10 +457,14 @@ async def step_password(message: Message, state: FSMContext) -> None:
         patients = await asyncio.to_thread(_validate_follower, region, email, password)
     except Exception as e:
         logger.warning("connect_cgm: логин follower[%s] не прошёл: %s", region, type(e).__name__)
+        left = register_failed_attempt(message.from_user.id)
+        tail = f"Осталось попыток: {left}." if left else "Попытки на сегодня исчерпаны, вернись через 15 минут."
         await status.edit_text(
-            f"❌ Логин не прошёл: {short_login_error(e)}\n\nНичего не сохранил. /connect_cgm — попробовать снова."
+            f"❌ Логин не прошёл: {short_login_error(e)}\n\nНичего не сохранил. {tail}\n/connect_cgm — попробовать снова."
         )
         return
+
+    clear_failed_attempts(message.from_user.id)
 
     ok, err = await asyncio.to_thread(_save_follower, message.from_user.id, region, email, password)
     if not ok:

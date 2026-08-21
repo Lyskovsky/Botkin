@@ -397,13 +397,18 @@ def _followers_from_env() -> list[dict]:
 def _followers_from_db(db_url: str | None = None) -> list[dict]:
     """Активные followers из таблицы cgm_followers; пароль расшифровывается на месте.
 
-    Деградирует к [] при ЛЮБОЙ проблеме — нет DATABASE_URL (например --dry-run),
-    таблицы ещё нет (миграция не накатана), не задан SECRETS_KEY, не установлена
-    cryptography. Env-путь обязан продолжать работать сам: иначе один
-    недокрученный деплой остановил бы импорт глюкозы у всех сразу.
+    Деградируем к [] ТОЛЬКО на ожидаемых причинах: нет DATABASE_URL (например
+    --dry-run), БД недоступна, таблицы ещё нет (миграция не накатана), нет прав.
+    Env-путь обязан продолжать работать сам — иначе один недокрученный деплой
+    остановил бы импорт глюкозы у всех сразу.
+
+    Всё НЕожидаемое (опечатка в SQL, битая схема) логируем на уровне error с
+    трейсбеком: молча проглоченная такая ошибка означала бы, что все БД-followers
+    выпали, а импортёр рапортует об успехе — и при пустом LLU_FOLLOWERS это могло
+    бы остаться незамеченным месяцами.
     """
     try:
-        from core.infra.secrets import decrypt_secret
+        from core.infra.secrets import SecretDecryptError, SecretsKeyMissingError, decrypt_secret
     except ImportError as e:
         logger.warning("расшифровка недоступна (%s) — followers из БД пропущены", e)
         return []
@@ -413,26 +418,39 @@ def _followers_from_db(db_url: str | None = None) -> list[dict]:
         return []
     try:
         conn = psycopg2.connect(db_url)
-    except Exception as e:
+    except psycopg2.OperationalError as e:
         logger.warning("cgm_followers: нет соединения с БД (%s) — работаю по LLU_FOLLOWERS", e)
+        return []
+    except Exception:
+        logger.error("cgm_followers: неожиданная ошибка соединения с БД", exc_info=True)
         return []
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT region, email, password_enc FROM cgm_followers WHERE revoked_at IS NULL ORDER BY id")
+            cur.execute(
+                "SELECT id, region, email, password_enc FROM cgm_followers WHERE revoked_at IS NULL ORDER BY id"
+            )
             raw = cur.fetchall()
-    except Exception as e:
-        logger.warning("cgm_followers не прочитана (%s) — работаю по LLU_FOLLOWERS", e)
+    except (psycopg2.errors.UndefinedTable, psycopg2.errors.UndefinedColumn) as e:
+        # Миграция cgmfol0self01 ещё не накатана — ожидаемое состояние на проде
+        # между деплоем кода и ручным workflow миграций.
+        logger.warning("cgm_followers: таблицы/колонки нет (%s) — работаю по LLU_FOLLOWERS", e)
+        return []
+    except psycopg2.errors.InsufficientPrivilege as e:
+        logger.warning("cgm_followers: нет прав на чтение (%s) — работаю по LLU_FOLLOWERS", e)
+        return []
+    except Exception:
+        logger.error("cgm_followers: неожиданная ошибка чтения таблицы", exc_info=True)
         return []
     finally:
         conn.close()
 
     out: list[dict] = []
-    for region, email, password_enc in raw:
+    for row_id, region, email, password_enc in raw:
         try:
             password = decrypt_secret(password_enc)
-        except Exception as e:
-            # Чаще всего это чужой/сменённый SECRETS_KEY. Пропускаем именно эту
-            # запись, остальные followers должны работать.
+        except (SecretDecryptError, SecretsKeyMissingError) as e:
+            # Чужой/сменённый SECRETS_KEY или испорченное значение. Пропускаем
+            # именно эту запись, остальные followers должны работать.
             logger.warning(
                 "follower[%s] %s: пароль не расшифровался (%s) — пропуск",
                 region,
@@ -440,8 +458,55 @@ def _followers_from_db(db_url: str | None = None) -> list[dict]:
                 e,
             )
             continue
-        out.append({"region": str(region or "EU").upper(), "email": email, "password": password})
+        except Exception:
+            logger.error(
+                "follower[%s] %s: неожиданная ошибка расшифровки",
+                region,
+                _mask_email(email),
+                exc_info=True,
+            )
+            continue
+        out.append({"id": row_id, "region": str(region or "EU").upper(), "email": email, "password": password})
     return out
+
+
+def _mark_follower_status(
+    follower_id: int | None, ok: bool, error: str | None = None, db_url: str | None = None
+) -> None:
+    """Записать в cgm_followers результат последнего логина (для /my_connections).
+
+    Только для записей из БД: у env-follower'ов id нет. Диагностика не должна
+    ронять импорт, поэтому свои ошибки гасим — но логируем.
+    """
+    if not follower_id:
+        return
+    db_url = db_url or os.getenv("DATABASE_URL")
+    if not db_url:
+        return
+    try:
+        conn = psycopg2.connect(db_url)
+    except Exception as e:
+        logger.debug("cgm_followers: не смог записать статус follower %s: %s", follower_id, e)
+        return
+    try:
+        with conn.cursor() as cur:
+            if ok:
+                cur.execute(
+                    "UPDATE cgm_followers SET last_ok_at = now(), last_error = NULL WHERE id = %s",
+                    (follower_id,),
+                )
+            else:
+                # Обрезаем: в last_error попадает текст исключения, а показываем мы
+                # его пользователю в /my_connections.
+                cur.execute(
+                    "UPDATE cgm_followers SET last_error = %s WHERE id = %s",
+                    ((error or "неизвестная ошибка")[:500], follower_id),
+                )
+        conn.commit()
+    except Exception as e:
+        logger.debug("cgm_followers: не смог записать статус follower %s: %s", follower_id, e)
+    finally:
+        conn.close()
 
 
 def _extra_followers() -> list[dict]:
@@ -579,22 +644,28 @@ def collect_rows_all() -> dict[str, list[dict]]:
 
     for f in _extra_followers():
         region = f["region"]
+        fid = f.get("id")  # None у env-follower'ов — им статус писать некуда
         try:
             client = _get_extra_client(f)
         except LoginOnCooldownError as e:
             logger.warning("follower[%s] на cooldown (%s) — пропуск", region, e)
+            _mark_follower_status(fid, ok=False, error=f"логин на cooldown: {e}")
             continue
         except Exception as e:
             logger.warning("follower[%s] логин упал (%s) — пропуск", region, e)
+            _mark_follower_status(fid, ok=False, error=f"логин не прошёл: {e}")
             continue
         try:
             result.update(collect_rows(client))
+            _mark_follower_status(fid, ok=True)
         except Exception as e:
             logger.warning("follower[%s] pull упал (%s) — сброс токена и повтор", region, e)
             try:
                 result.update(collect_rows(_get_extra_client(f, reset=True)))
+                _mark_follower_status(fid, ok=True)
             except Exception as e2:
                 logger.warning("follower[%s] повтор тоже упал (%s) — пропуск", region, e2)
+                _mark_follower_status(fid, ok=False, error=f"чтение данных не удалось: {e2}")
     return result
 
 

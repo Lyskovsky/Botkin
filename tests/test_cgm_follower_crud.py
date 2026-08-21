@@ -112,3 +112,27 @@ def test_empty_fields_rejected(test_db, owner):
         create_cgm_follower(test_db, OWNER, region="RU", email="", password="p")
     with pytest.raises(ValueError):
         create_cgm_follower(test_db, OWNER, region="RU", email="a@x.ru", password="")
+
+
+# ── login_ok → last_ok_at (ревью #382) ────────────────────────────────────────
+
+
+def test_login_ok_sets_last_ok_at(test_db, owner):
+    """/connect_cgm проверяет логин живьём — /my_connections не должен потом
+    писать «ещё не логинился» у рабочего аккаунта."""
+    f = create_cgm_follower(test_db, OWNER, region="RU", email="a@x.ru", password="p", login_ok=True)
+
+    assert f.last_ok_at is not None
+
+
+def test_without_login_ok_stays_empty(test_db, owner):
+    f = create_cgm_follower(test_db, OWNER, region="RU", email="a@x.ru", password="p")
+
+    assert f.last_ok_at is None
+
+
+def test_login_ok_updates_existing_record(test_db, owner):
+    create_cgm_follower(test_db, OWNER, region="RU", email="a@x.ru", password="p")
+    again = create_cgm_follower(test_db, OWNER, region="RU", email="a@x.ru", password="p2", login_ok=True)
+
+    assert again.last_ok_at is not None

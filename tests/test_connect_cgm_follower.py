@@ -308,3 +308,97 @@ async def test_bind_reports_taken_patient(monkeypatch):
     await h.on_bind(cb, h.CgmBindCallback(patient_id="p1"))
 
     assert "уже привязан" in cb.message.answer.await_args.args[0].lower()
+
+
+# ── лимит неудачных попыток (ревью #382) ──────────────────────────────────────
+
+
+@pytest.fixture(autouse=True)
+def _clean_attempts():
+    h._login_attempts.clear()
+    yield
+    h._login_attempts.clear()
+
+
+def test_attempts_left_starts_full():
+    assert h.attempts_left(UID) == h._MAX_LOGIN_ATTEMPTS
+
+
+def test_register_failed_attempt_decrements():
+    assert h.register_failed_attempt(UID, now=1000.0) == h._MAX_LOGIN_ATTEMPTS - 1
+    assert h.attempts_left(UID, now=1000.0) == h._MAX_LOGIN_ATTEMPTS - 1
+
+
+def test_attempts_window_expires():
+    """Старые неудачи выпадают из окна — пользователь не заперт навсегда."""
+    h.register_failed_attempt(UID, now=1000.0)
+    assert h.attempts_left(UID, now=1000.0 + h._ATTEMPT_WINDOW_SEC + 1) == h._MAX_LOGIN_ATTEMPTS
+
+
+def test_clear_failed_attempts_on_success():
+    h.register_failed_attempt(UID, now=1000.0)
+    h.clear_failed_attempts(UID)
+    assert h.attempts_left(UID, now=1000.0) == h._MAX_LOGIN_ATTEMPTS
+
+
+@pytest.mark.asyncio
+async def test_exhausted_attempts_block_network(monkeypatch):
+    """Лимит исчерпан → в LibreLinkUp не идём: серия неудач = бан 476 на весь регион."""
+    # Время берём то же, что использует хендлер (monotonic), иначе попытки
+    # окажутся «просроченными» и лимит не сработает.
+    now = h._now()
+    for i in range(h._MAX_LOGIN_ATTEMPTS):
+        h.register_failed_attempt(UID, now=now + i)
+    msg, _ = _message("p")
+    st = _state({"region": "RU", "email": "a@x.ru"})
+    net = MagicMock()
+    monkeypatch.setattr(h, "_validate_follower", net)
+
+    await h.step_password(msg, st)
+
+    net.assert_not_called()
+    assert msg.delete.await_count == 1  # пароль всё равно удалён
+    assert "попыток" in msg.answer.await_args.args[0].lower()
+
+
+@pytest.mark.asyncio
+async def test_failed_login_registers_attempt(monkeypatch):
+    msg, _ = _message("wrong")
+    st = _state({"region": "RU", "email": "a@x.ru"})
+
+    def boom(*a):
+        raise RuntimeError("Invalid login credentials")
+
+    monkeypatch.setattr(h, "_validate_follower", boom)
+    monkeypatch.setattr(h, "_save_follower", lambda *a: (True, ""))
+
+    await h.step_password(msg, st)
+
+    assert h.attempts_left(UID) == h._MAX_LOGIN_ATTEMPTS - 1
+
+
+@pytest.mark.asyncio
+async def test_successful_login_clears_attempts(monkeypatch):
+    h.register_failed_attempt(UID)
+    msg, _ = _message("right")
+    st = _state({"region": "RU", "email": "a@x.ru"})
+    monkeypatch.setattr(h, "_validate_follower", lambda *a: [{"patient_id": "p1", "name": "N"}])
+    monkeypatch.setattr(h, "_save_follower", lambda *a: (True, ""))
+
+    await h.step_password(msg, st)
+
+    assert h.attempts_left(UID) == h._MAX_LOGIN_ATTEMPTS
+
+
+@pytest.mark.asyncio
+async def test_lost_region_does_not_fall_back_to_eu(monkeypatch):
+    """Регион и email проверяем одинаково: молчаливый EU дал бы логин не в тот регион."""
+    msg, _ = _message("p")
+    st = _state({"email": "a@x.ru"})  # region потерян
+    net = MagicMock()
+    monkeypatch.setattr(h, "_validate_follower", net)
+
+    await h.step_password(msg, st)
+
+    net.assert_not_called()
+    assert "начни заново" in msg.answer.await_args.args[0].lower()

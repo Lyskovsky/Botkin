@@ -91,7 +91,7 @@ def test_followers_from_db_decrypts_and_skips_broken(monkeypatch):
     from core.infra.secrets import encrypt_secret
 
     good = encrypt_secret("real-password")
-    rows = [("ru", "ok@x", good), ("EU", "bad@x", "v1:not-a-real-token")]
+    rows = [(1, "ru", "ok@x", good), (2, "EU", "bad@x", "v1:not-a-real-token")]
 
     class _Cur:
         def __enter__(self):
@@ -115,7 +115,7 @@ def test_followers_from_db_decrypts_and_skips_broken(monkeypatch):
 
     monkeypatch.setattr(llu.psycopg2, "connect", lambda *a, **kw: _Conn())
     got = llu._followers_from_db("postgresql://x/y")
-    assert got == [{"region": "RU", "email": "ok@x", "password": "real-password"}]
+    assert got == [{"id": 1, "region": "RU", "email": "ok@x", "password": "real-password"}]
 
 
 def test_mask_email_hides_local_part():
@@ -294,3 +294,173 @@ def test_get_extra_client_backoff_is_per_region(monkeypatch, tmp_path):
     us = {"region": "US", "email": "u@x", "password": "p"}
     c = llu._get_extra_client(us)
     assert c.token == "FRESH"  # US залогинился, RU-cooldown не помешал
+
+
+# ── _followers_from_db: узкие исключения (ревью #382) ─────────────────────────
+
+
+def _fake_conn(rows=None, raise_on_execute=None):
+    class _Cur:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def execute(self, *a):
+            if raise_on_execute is not None:
+                raise raise_on_execute
+
+        def fetchall(self):
+            return rows or []
+
+    class _Conn:
+        def cursor(self):
+            return _Cur()
+
+        def commit(self):
+            pass
+
+        def close(self):
+            pass
+
+    return _Conn()
+
+
+def test_followers_from_db_missing_table_is_expected(monkeypatch, caplog):
+    """Миграция не накатана — ожидаемое состояние: warning, не error."""
+    import psycopg2
+
+    monkeypatch.setattr(
+        llu.psycopg2,
+        "connect",
+        lambda *a, **kw: _fake_conn(raise_on_execute=psycopg2.errors.UndefinedTable("нет таблицы")),
+    )
+    with caplog.at_level("WARNING"):
+        assert llu._followers_from_db("postgresql://x/y") == []
+    assert not [r for r in caplog.records if r.levelname == "ERROR"]
+
+
+def test_followers_from_db_unexpected_error_is_logged_as_error(monkeypatch, caplog):
+    """Неожиданная ошибка (опечатка в SQL) не должна тонуть в тишине — error + трейсбек."""
+    monkeypatch.setattr(llu.psycopg2, "connect", lambda *a, **kw: _fake_conn(raise_on_execute=TypeError("бага в коде")))
+    with caplog.at_level("ERROR"):
+        assert llu._followers_from_db("postgresql://x/y") == []
+    errors = [r for r in caplog.records if r.levelname == "ERROR"]
+    assert errors and errors[0].exc_info is not None
+
+
+def test_followers_from_db_unexpected_connect_error_is_error(monkeypatch, caplog):
+    def boom(*a, **kw):
+        raise ValueError("не OperationalError")
+
+    monkeypatch.setattr(llu.psycopg2, "connect", boom)
+    with caplog.at_level("ERROR"):
+        assert llu._followers_from_db("postgresql://x/y") == []
+    assert [r for r in caplog.records if r.levelname == "ERROR"]
+
+
+def test_followers_from_db_returns_row_id(monkeypatch):
+    """id нужен, чтобы писать last_ok_at/last_error именно в эту запись."""
+    from core.infra.secrets import encrypt_secret
+
+    rows = [(7, "RU", "a@x.ru", encrypt_secret("p"))]
+    monkeypatch.setattr(llu.psycopg2, "connect", lambda *a, **kw: _fake_conn(rows=rows))
+    assert llu._followers_from_db("postgresql://x/y")[0]["id"] == 7
+
+
+# ── _mark_follower_status ─────────────────────────────────────────────────────
+
+
+def test_mark_follower_status_noop_without_id(monkeypatch):
+    """У env-follower'а id нет — в БД не лезем вовсе."""
+    called = []
+    monkeypatch.setattr(llu.psycopg2, "connect", lambda *a, **kw: called.append(1))
+    llu._mark_follower_status(None, ok=True, db_url="postgresql://x/y")
+    assert called == []
+
+
+def test_mark_follower_status_writes_ok(monkeypatch):
+    sql = []
+
+    class _Cur:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def execute(self, q, params=None):
+            sql.append((q, params))
+
+    class _Conn:
+        def cursor(self):
+            return _Cur()
+
+        def commit(self):
+            pass
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(llu.psycopg2, "connect", lambda *a, **kw: _Conn())
+    llu._mark_follower_status(7, ok=True, db_url="postgresql://x/y")
+    assert "last_ok_at = now()" in sql[0][0] and sql[0][1] == (7,)
+
+
+def test_mark_follower_status_truncates_error(monkeypatch):
+    sql = []
+
+    class _Cur:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def execute(self, q, params=None):
+            sql.append((q, params))
+
+    class _Conn:
+        def cursor(self):
+            return _Cur()
+
+        def commit(self):
+            pass
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(llu.psycopg2, "connect", lambda *a, **kw: _Conn())
+    llu._mark_follower_status(7, ok=False, error="x" * 900, db_url="postgresql://x/y")
+    assert len(sql[0][1][0]) == 500
+
+
+def test_collect_rows_all_marks_success(monkeypatch):
+    """Успешный pull отмечается — иначе /my_connections вечно «ещё не логинился»."""
+    marks = []
+    monkeypatch.setattr(llu, "collect_rows_with_retry", lambda: {})
+    monkeypatch.setattr(llu, "_extra_followers", lambda: [{"id": 7, "region": "RU", "email": "a@x", "password": "p"}])
+    monkeypatch.setattr(llu, "_get_extra_client", lambda f, reset=False: object())
+    monkeypatch.setattr(llu, "collect_rows", lambda client: {"p1": []})
+    monkeypatch.setattr(llu, "_mark_follower_status", lambda fid, ok, error=None: marks.append((fid, ok)))
+
+    llu.collect_rows_all()
+
+    assert marks == [(7, True)]
+
+
+def test_collect_rows_all_marks_login_failure(monkeypatch):
+    marks = []
+    monkeypatch.setattr(llu, "collect_rows_with_retry", lambda: {})
+    monkeypatch.setattr(llu, "_extra_followers", lambda: [{"id": 7, "region": "RU", "email": "a@x", "password": "p"}])
+
+    def boom(f, reset=False):
+        raise RuntimeError("476 ban")
+
+    monkeypatch.setattr(llu, "_get_extra_client", boom)
+    monkeypatch.setattr(llu, "_mark_follower_status", lambda fid, ok, error=None: marks.append((fid, ok, error)))
+
+    llu.collect_rows_all()
+
+    assert marks[0][0] == 7 and marks[0][1] is False and "476" in marks[0][2]

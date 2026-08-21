@@ -321,12 +321,17 @@ def create_cgm_follower(
     email: str,
     password: str,
     label: Optional[str] = None,
+    login_ok: bool = False,
 ) -> CgmFollower:
     """Сохранить (или обновить) креды follower-аккаунта. Пароль шифруется здесь.
 
     Повторный ввод тех же (region, email) — не ошибка, а смена пароля: обновляем
     запись и снимаем revoked_at. Чужую запись перезаписать нельзя: (region, email)
     уникален глобально, и молча забрать аккаунт другого пользователя мы не должны.
+
+    login_ok=True — вызывающий уже проверил логин живьём (так делает /connect_cgm):
+    сразу ставим last_ok_at, чтобы /my_connections не показывал «ещё не логинился»
+    у только что проверенного аккаунта.
     """
     from core.infra.secrets import encrypt_secret
 
@@ -348,6 +353,8 @@ def create_cgm_follower(
             existing.label = label
         existing.revoked_at = None
         existing.last_error = None
+        if login_ok:
+            existing.last_ok_at = datetime.now(timezone.utc)
         db.commit()
         db.refresh(existing)
         return existing
@@ -358,6 +365,7 @@ def create_cgm_follower(
         email=email,
         password_enc=encrypt_secret(password),
         label=label,
+        last_ok_at=datetime.now(timezone.utc) if login_ok else None,
     )
     db.add(follower)
     db.commit()
