@@ -27,6 +27,7 @@ from database.models import (
     BodyMeasurement,
     UserSettings,
     PersonalAccessToken,
+    CgmFollower,
     VerifiedProduct,
     UserFeedback,
 )
@@ -302,6 +303,103 @@ def revoke_pat(db: Session, telegram_id: int, token_id: int) -> bool:
     if not pat:
         return False
     pat.revoked_at = datetime.now(timezone.utc)
+    db.commit()
+    return True
+
+
+# ==================== CGM FOLLOWER OPERATIONS ====================
+# Креды follower-аккаунтов LibreLinkUp, введённые самим пользователем (#381).
+# Пароль всегда шифруется core.infra.secrets перед записью — в БД plaintext не
+# попадает. Импорт локальный: cryptography добавлена этим же PR, и на образе,
+# который ещё не пересобран, бот должен стартовать (упадёт только эта команда).
+
+
+def create_cgm_follower(
+    db: Session,
+    telegram_id: int,
+    region: str,
+    email: str,
+    password: str,
+    label: Optional[str] = None,
+    login_ok: bool = False,
+) -> CgmFollower:
+    """Сохранить (или обновить) креды follower-аккаунта. Пароль шифруется здесь.
+
+    Повторный ввод тех же (region, email) — не ошибка, а смена пароля: обновляем
+    запись и снимаем revoked_at. Чужую запись перезаписать нельзя: (region, email)
+    уникален глобально, и молча забрать аккаунт другого пользователя мы не должны.
+
+    login_ok=True — вызывающий уже проверил логин живьём (так делает /connect_cgm):
+    сразу ставим last_ok_at, чтобы /my_connections не показывал «ещё не логинился»
+    у только что проверенного аккаунта.
+    """
+    from core.infra.secrets import encrypt_secret
+
+    user = get_user_by_telegram_id(db, telegram_id)
+    if not user:
+        raise ValueError(f"User {telegram_id} not found")
+
+    region = (region or "").strip().upper()
+    email = (email or "").strip().lower()
+    if not region or not email or not password:
+        raise ValueError("region, email и password обязательны")
+
+    existing = db.query(CgmFollower).filter(CgmFollower.region == region, CgmFollower.email == email).first()
+    if existing is not None:
+        if existing.owner_user_id != telegram_id:
+            raise ValueError("Этот follower-аккаунт уже подключён другим пользователем")
+        existing.password_enc = encrypt_secret(password)
+        if label:
+            existing.label = label
+        existing.revoked_at = None
+        existing.last_error = None
+        if login_ok:
+            existing.last_ok_at = datetime.now(timezone.utc)
+        db.commit()
+        db.refresh(existing)
+        return existing
+
+    follower = CgmFollower(
+        owner_user_id=telegram_id,
+        region=region,
+        email=email,
+        password_enc=encrypt_secret(password),
+        label=label,
+        last_ok_at=datetime.now(timezone.utc) if login_ok else None,
+    )
+    db.add(follower)
+    db.commit()
+    db.refresh(follower)
+    return follower
+
+
+def list_cgm_followers(db: Session, telegram_id: int, include_revoked: bool = False) -> List[CgmFollower]:
+    """Follower-аккаунты пользователя (по умолчанию только активные), новые сверху."""
+    query = db.query(CgmFollower).filter(CgmFollower.owner_user_id == telegram_id)
+    if not include_revoked:
+        query = query.filter(CgmFollower.revoked_at.is_(None))
+    return query.order_by(desc(CgmFollower.created_at), desc(CgmFollower.id)).all()
+
+
+def revoke_cgm_follower(db: Session, telegram_id: int, follower_id: int) -> bool:
+    """Отозвать follower (soft-delete через revoked_at), скоупясь по владельцу.
+
+    True — найден и отозван; False — не найден, чужой или уже отозван.
+    Импортёр читает только записи с revoked_at IS NULL, поэтому логины прекращаются
+    со следующего запуска.
+    """
+    follower = (
+        db.query(CgmFollower)
+        .filter(
+            CgmFollower.id == follower_id,
+            CgmFollower.owner_user_id == telegram_id,
+            CgmFollower.revoked_at.is_(None),
+        )
+        .first()
+    )
+    if not follower:
+        return False
+    follower.revoked_at = datetime.now(timezone.utc)
     db.commit()
     return True
 

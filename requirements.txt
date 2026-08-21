@@ -41,6 +41,10 @@ uvicorn[standard]>=0.24.0
 # >=2.13.0: GHSA-752w-5fwx-jx9f (unknown crit header) + серия PYSEC-2026 (auth)
 pyjwt>=2.13.0
 
+# Шифрование пользовательских секретов (core/infra/secrets.py, Fernet) — #381.
+# Явная зависимость: транзитивно cryptography в проект НЕ приходила.
+cryptography>=43.0.0
+
 # Rendering PNG-отчётов агентом (см. core/reports/biomarker_dynamics.py)
 matplotlib>=3.8
 defusedxml==0.7.1

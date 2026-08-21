@@ -23,6 +23,10 @@ _DUMMY_KEYS = {
     # Тесты используют отдельный in-memory SQLite и патчат SessionLocal, поэтому
     # сюда достаточно ленивого dummy-URL — реального коннекта по нему не будет.
     "DATABASE_URL": "postgresql://botkin_ci:botkin_ci@localhost:5432/botkin_ci",
+    # Fernet-ключ для core/infra/secrets.py. Валидный по формату, но заведомо
+    # тестовый: без него encrypt_secret осознанно падает, и тесты шифрования
+    # пришлось бы обвешивать monkeypatch поштучно.
+    "SECRETS_KEY": "Zm9yLXRlc3RzLW9ubHktMzItYnl0ZXMta2V5LWFiY2Q=",
 }
 for _k, _v in _DUMMY_KEYS.items():
     os.environ.setdefault(_k, _v)
