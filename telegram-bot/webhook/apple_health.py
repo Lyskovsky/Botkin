@@ -463,6 +463,26 @@ def _hae_pick(rec: dict, *keys, default=None):
     return default
 
 
+def _energy_to_kcal(qty: float, units: str) -> float:
+    """Суточная сумма энергии → ккал.
+
+    Известный баг HAE: приложение присылает МЕГАджоули, подписывая их как "kJ".
+    Признак — неправдоподобно малое суточное значение: 5,9 кДж это 1,4 ккал (не
+    бывает даже за минуту сна), а 5,9 МДж = 1400 ккал — нормальный базовый обмен.
+
+    ⚠️ Эвристику применяем к СУММЕ за день, а НЕ к каждой записи. Энергия
+    приходит минутными интервалами, и на отдельном куске порог «<100» срабатывает
+    всегда — именно так базовый обмен превращался в миллионы ккал (bmr_calories
+    16–21.08.2026: 1,9 млн вместо 2100). Сначала суммируем в исходных единицах,
+    конвертируем один раз.
+    """
+    if units == "mj" or (units == "kj" and qty < 100):
+        return round(qty * 239.006, 1)  # MJ → kcal
+    if units == "kj":
+        return round(qty / 4.184, 1)  # kJ → kcal
+    return round(qty, 1)  # kcal как есть
+
+
 def _hae_to_daily_payloads(metrics: list[dict]) -> dict[str, AppleHealthPayload]:
     """Сгруппировать HAE metrics → {YYYY-MM-DD: AppleHealthPayload}.
 
@@ -501,25 +521,15 @@ def _hae_to_daily_payloads(metrics: list[dict]) -> dict[str, AppleHealthPayload]
                     _hae_pick(rec, "qty", "Avg", default=0)
                 )
             elif name in ("active_energy", "active_energy_burned"):
-                qty = float(_hae_pick(rec, "qty", "Avg", default=0))
-                # HAE баг: шлёт МДж (MJ), но пишет units="kJ".
-                # Признак: значение < 100 при units=kJ → трактуем как MJ.
-                # 5.858 "kJ" → 5.858 МДж × 239 = 1399 ккал (реалистично).
-                if units == "mj" or (units == "kj" and qty < 100):
-                    qty = round(qty * 239.006, 1)  # MJ → kcal
-                elif units == "kj":
-                    qty = round(qty / 4.184, 1)  # kJ → kcal
-                slot["active_energy_kcal"] = round(float(slot.get("active_energy_kcal") or 0) + qty, 1)
+                # Копим в ИСХОДНЫХ единицах; конверсия — один раз к суточной сумме
+                # (см. _energy_to_kcal: иначе минутные интервалы дают миллионы ккал).
+                slot["_active_raw"] = float(slot.get("_active_raw") or 0) + float(
+                    _hae_pick(rec, "qty", "Avg", default=0)
+                )
+                slot["_active_units"] = units
             elif name in ("basal_energy_burned", "resting_energy"):
-                qty = float(_hae_pick(rec, "qty", "Avg", default=0))
-                # HAE баг: шлёт МДж (MJ), но пишет units="kJ".
-                # Признак: значение < 100 при units=kJ → трактуем как MJ.
-                # 5.858 "kJ" → 5.858 МДж × 239 = 1399 ккал (реалистично).
-                if units == "mj" or (units == "kj" and qty < 100):
-                    qty = round(qty * 239.006, 1)  # MJ → kcal
-                elif units == "kj":
-                    qty = round(qty / 4.184, 1)  # kJ → kcal
-                slot["basal_energy_kcal"] = round(float(slot.get("basal_energy_kcal") or 0) + qty, 1)
+                slot["_basal_raw"] = float(slot.get("_basal_raw") or 0) + float(_hae_pick(rec, "qty", "Avg", default=0))
+                slot["_basal_units"] = units
             elif name == "heart_rate":
                 if "Avg" in rec and rec["Avg"] is not None:
                     slot["heart_rate_avg"] = int(round(float(rec["Avg"])))
@@ -635,6 +645,17 @@ def _hae_to_daily_payloads(metrics: list[dict]) -> dict[str, AppleHealthPayload]
                     slot["spo2_pct"] = round(float(v), 1)
 
     # Преобразуем dict-ы в pydantic AppleHealthPayload (для валидации)
+    # Энергию конвертируем ПОСЛЕ суммирования: служебные ключи в payload не нужны.
+    for fields in by_date.values():
+        for raw_key, units_key, out_key in (
+            ("_active_raw", "_active_units", "active_energy_kcal"),
+            ("_basal_raw", "_basal_units", "basal_energy_kcal"),
+        ):
+            raw_sum = fields.pop(raw_key, None)
+            raw_units = fields.pop(units_key, "")
+            if raw_sum is not None:
+                fields[out_key] = _energy_to_kcal(raw_sum, raw_units)
+
     return {d: AppleHealthPayload(**fields) for d, fields in by_date.items()}
 
 
