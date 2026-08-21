@@ -5,6 +5,7 @@
 Чисто in-memory, без БД.
 """
 
+import logging
 import sys
 from pathlib import Path
 
@@ -304,3 +305,39 @@ def test_service_keys_do_not_leak_into_payload():
 
     p = _hae_to_daily_payloads(_energy_metric("basal_energy_burned", "kJ", [6.1] * 10))["2026-08-21"]
     assert not hasattr(p, "_basal_raw")
+
+
+# ── пробелы, найденные ревью #384 ─────────────────────────────────────────────
+
+
+def test_partial_day_small_kj_sum_not_inflated_as_mj(caplog):
+    """Частичный день: 3 записи по 7 кДж = 21 кДж ≈ 5 ккал, а НЕ 5019.
+
+    Порог «<100 = это МДж» осмыслен только для суточного агрегата (одна точка).
+    При неполной синхронизации сумма честно мала — умножать её на 239 нельзя.
+    """
+
+    with caplog.at_level(logging.WARNING):
+        payloads = _hae_to_daily_payloads(_energy_metric("basal_energy_burned", "kJ", [7.0, 7.0, 7.0]))
+
+    assert payloads["2026-08-21"].basal_energy_kcal == pytest.approx(5.0, abs=0.1)
+    # Тихо подменять число нельзя — спорный случай должен быть виден в логах.
+    assert any("частичный день" in r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING)
+
+
+def test_single_small_kj_record_still_treated_as_mj():
+    """Обратная совместимость: ОДНА запись <100 кДж — это мислейбл МДж (баг HAE)."""
+
+    payloads = _hae_to_daily_payloads(_energy_metric("basal_energy_burned", "kJ", [5.858]))
+    assert payloads["2026-08-21"].basal_energy_kcal == pytest.approx(1400.1, abs=1.0)
+
+
+def test_mixed_units_in_one_day_converted_per_unit():
+    """kcal и kJ в одном дне: каждая группа конвертируется своим правилом.
+
+    Регресс #384: сырые qty с разными units складывались в одно число ДО
+    конверсии — 1000 kcal + 4184 kJ давали 1239 ккал вместо ~2000, молча.
+    """
+
+    metrics = _energy_metric("active_energy", "kcal", [1000.0]) + _energy_metric("active_energy", "kJ", [4184.0])
+    assert _hae_to_daily_payloads(metrics)["2026-08-21"].active_energy_kcal == pytest.approx(2000.0, abs=1.0)
