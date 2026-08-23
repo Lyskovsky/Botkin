@@ -435,16 +435,17 @@ async def main():
     # (или первого деплоя) Telegram не знает куда слать апдейты — сообщения
     # копятся в очереди и бот «молчит». Прецедент: 12.05.2026 при свитче
     # @HealthVault_bot → @Botkin_md_bot webhook не зарегистрировали вручную.
-    # Default — legacy-домен: прод-.env не задаёт TELEGRAM_WEBHOOK_URL, а nginx
-    # botkin.health не проксирует /telegram/ (проверено 11.06.2026). Перевод на
-    # botkin.health — только вместе с nginx-location и сменой webhook у Telegram.
     # Дев-стенд без публичного TLS-эндпойнта: Telegram-апдейты тянем polling'ом,
     # но FastAPI-сервер (/health, дашборд, /api/agent) ВСЁ РАВНО поднимаем —
     # поэтому отключаем только webhook-регистрацию, а не сервер целиком.
     # Включается переменной BOTKIN_FORCE_POLLING=1 (см. docker-compose.dev.yml).
     force_polling = os.getenv("BOTKIN_FORCE_POLLING") == "1"
 
-    webhook_url = os.getenv("TELEGRAM_WEBHOOK_URL", "https://health.orangegate.cc/telegram/webhook")
+    # Дефолт переведён на botkin.health (#387, вывод legacy-домена orangegate).
+    # Реальный переход требует синхронной готовности nginx-location /telegram/webhook
+    # на botkin.health и перерегистрации webhook у Telegram — до этого прод
+    # держит TELEGRAM_WEBHOOK_URL=health.orangegate.cc/telegram/webhook явно в .env.
+    webhook_url = os.getenv("TELEGRAM_WEBHOOK_URL", "https://botkin.health/telegram/webhook")
     if webhook_enabled and not force_polling and webhook_url:
         try:
             info = await bot.get_webhook_info()

@@ -34,10 +34,12 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 logger = logging.getLogger(__name__)
 router = Router()
 
-# Хост API, который коннектор Claude Desktop дёргает для обмена PAT→JWT. Это НЕ
-# botkin.health (там статический лендинг) — /api/agent/* живёт на health-домене.
+# Хост API, который коннектор Claude Desktop дёргает для обмена PAT→JWT.
+# Дефолт переведён на botkin.health (#387, вывод legacy-домена orangegate) —
+# актуально только после того как там появится nginx-location /api/. До
+# готовности прод держит BOTKIN_API_BASE=health.orangegate.cc явно в .env.
 # Overridable для дев-стенда.
-CONNECTOR_API_BASE = os.getenv("BOTKIN_API_BASE", "https://health.orangegate.cc")
+CONNECTOR_API_BASE = os.getenv("BOTKIN_API_BASE", "https://botkin.health")
 
 MAX_NAME_LEN = 100
 
