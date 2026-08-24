@@ -450,7 +450,17 @@ async def main():
         try:
             info = await bot.get_webhook_info()
             if info.url != webhook_url:
-                await bot.set_webhook(url=webhook_url, allowed_updates=["message", "callback_query"])
+                # secret_token ОБЯЗАТЕЛЕН: без него set_webhook сбрасывает секрет на
+                # стороне Telegram, а /telegram/webhook продолжает требовать
+                # TELEGRAM_WEBHOOK_SECRET → все апдейты получают 403 "Invalid webhook
+                # secret". Прецедент #387 (24.08.2026): смена URL при выводе
+                # health.orangegate.cc уронила приём сообщений на ~2 минуты, пока не
+                # переустановили webhook вручную через Telegram API с secret_token.
+                await bot.set_webhook(
+                    url=webhook_url,
+                    secret_token=os.getenv("TELEGRAM_WEBHOOK_SECRET") or None,
+                    allowed_updates=["message", "callback_query"],
+                )
                 logger.info(f"✅ Webhook зарегистрирован: {webhook_url}")
             else:
                 logger.info(f"✅ Webhook уже актуален: {webhook_url}")
