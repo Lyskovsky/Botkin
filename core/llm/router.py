@@ -709,6 +709,10 @@ def analyze_message_claude(
             if response.status_code == 529 or response.status_code == 429:
                 time.sleep(2 ** (attempt + 1))
                 continue
+            if response.status_code >= 400 and "credit balance" in response.text.lower():
+                from core.infra.owner_alerts import notify_owner_low_anthropic_balance
+
+                notify_owner_low_anthropic_balance()
             response.raise_for_status()
             result = response.json()
 

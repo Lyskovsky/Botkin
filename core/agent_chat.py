@@ -2905,6 +2905,10 @@ def ask_agent(
                 history = [{"role": "user", "content": user_text}]
                 payload["messages"] = history
                 r = _post_with_overload_retry(payload)
+            if r.status_code >= 400 and "credit balance" in r.text.lower():
+                from core.infra.owner_alerts import notify_owner_low_anthropic_balance
+
+                notify_owner_low_anthropic_balance()
             r.raise_for_status()
             response = r.json()
 
