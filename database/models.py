@@ -210,6 +210,15 @@ class Weight(Base):
     bmi: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     visceral_fat: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     bone_mass: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    # Весы Withings отдают ещё четыре величины, которых нет ни в HealthKit, ни в
+    # прежней схеме. heart_rate особенно ценен: измеряется стоя, натощак — по сути
+    # пульс покоя, и именно он вскрыл фоновую тахикардию (13 из 22 замеров августа
+    # выше 100, максимум 127), которая по данным часов выглядела эпизодической.
+    heart_rate: Mapped[Optional[int]] = mapped_column(SmallInteger, nullable=True)
+    # Основной обмен по составу тела — точнее оценки Apple по возрасту и весу.
+    bmr_kcal: Mapped[Optional[int]] = mapped_column(SmallInteger, nullable=True)
+    fat_mass_kg: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    lean_mass_kg: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     source: Mapped[Optional[str]] = mapped_column(
         String(50), nullable=True
     )  # 'apple_health', 'zepp', 'manual', 'screenshot_ocr'

@@ -67,13 +67,15 @@ TOKEN_CACHE = Path(os.getenv("WITHINGS_TOKENS_PATH") or ROOT / "data" / "cache" 
 # Берём только то, что нужно таблице weights; давление/SpO2 идут своим каналом.
 MEASURE_TYPES = {
     1: "weight",  # кг
-    5: "lean_mass",  # безжировая масса, кг (в weights не пишем, для диагностики)
+    5: "lean_mass_kg",  # безжировая масса, кг
     6: "body_fat",  # % жира
+    8: "fat_mass_kg",  # жировая масса, кг
+    11: "heart_rate",  # пульс при взвешивании, уд/мин
     76: "muscle_mass",  # кг
     77: "hydration_kg",  # КИЛОГРАММЫ; в weights.water ожидаются ПРОЦЕНТЫ → пересчёт в parse
     88: "bone_mass",  # кг
     170: "visceral_fat",  # индекс
-    226: "bmr",  # основной обмен, ккал (колонки нет — только для --dry-run)
+    226: "bmr_kcal",  # основной обмен по составу тела, ккал
 }
 _MEASTYPES_PARAM = ",".join(str(k) for k in MEASURE_TYPES)
 
@@ -205,30 +207,56 @@ def measure_value(measure: dict) -> float:
     return measure["value"] * (10 ** measure["unit"])
 
 
+# Пульс весы пишут ОТДЕЛЬНОЙ группой, без веса, и таймстамп у неё сдвинут на
+# секунды-минуты относительно группы состава тела. Столько секунд считаем, что это
+# одно и то же взвешивание.
+_PULSE_MATCH_WINDOW_SEC = 180
+
+
 def parse_measure_groups(groups: list[dict]) -> list[dict]:
     """measuregrps → строки для weights. Чистая функция (без сети/БД).
 
-    Группы без веса отбрасываем: weights.weight NOT NULL, а отдельные группы
-    бывают только с пульсом (весы пишут его отдельной группой).
+    Группы без веса не идут в результат: `weights.weight` NOT NULL. Но пульс из
+    таких групп НЕ теряем — весы пишут его отдельной группой, и раньше он просто
+    отбрасывался вместе с ней. Теперь приписываем его ближайшему по времени
+    замеру состава тела (окно _PULSE_MATCH_WINDOW_SEC).
+
+    Это не косметика: пульс на весах измеряется стоя и натощак, то есть близок к
+    пульсу покоя. За 16–28.08.2026 весы зафиксировали 22 значения, 13 из них выше
+    100 уд/мин с максимумом 127 — и ни одно не попадало в базу.
 
     Вода: Withings отдаёт КИЛОГРАММЫ (hydration), а `weights.water` и поле API —
     ПРОЦЕНТЫ (так пишет канал HAE, и валидатор эндпоинта ограничивает 0..100).
     Пересчитываем здесь, в одном месте на оба пути записи.
     """
     rows: list[dict] = []
+    pulse_only: list[tuple[datetime, float]] = []
     for grp in groups:
         row: dict = {}
         for measure in grp.get("measures", []):
             field = MEASURE_TYPES.get(measure.get("type"))
             if field:
                 row[field] = round(measure_value(measure), 3)
+        measured_at = datetime.fromtimestamp(grp.get("date", 0), tz=timezone.utc)
         if "weight" not in row:
+            if row.get("heart_rate") is not None:
+                pulse_only.append((measured_at, row["heart_rate"]))
             continue
         hydration = row.pop("hydration_kg", None)
         if hydration is not None and row["weight"]:
             row["water"] = round(hydration / row["weight"] * 100, 1)
-        row["measured_at"] = datetime.fromtimestamp(grp.get("date", 0), tz=timezone.utc)
+        row["measured_at"] = measured_at
         rows.append(row)
+
+    # Склейка: каждый одиночный пульс — к ближайшему взвешиванию в пределах окна.
+    # Если у замера пульс уже есть (весы отдали его в той же группе), не трогаем.
+    for ts, hr in pulse_only:
+        if not rows:
+            break
+        nearest = min(rows, key=lambda r: abs((r["measured_at"] - ts).total_seconds()))
+        if abs((nearest["measured_at"] - ts).total_seconds()) <= _PULSE_MATCH_WINDOW_SEC:
+            nearest.setdefault("heart_rate", hr)
+
     return sorted(rows, key=lambda r: r["measured_at"])
 
 
@@ -321,9 +349,13 @@ def to_api_measurement(row: dict) -> dict:
     сервер, здесь дробный индекс информативнее.
     """
     m = {"measured_at": row["measured_at"].isoformat(), "weight": row["weight"]}
-    for field in ("body_fat", "muscle_mass", "water", "bone_mass", "visceral_fat"):
+    for field in ("body_fat", "muscle_mass", "water", "bone_mass", "visceral_fat", "fat_mass_kg", "lean_mass_kg"):
         if row.get(field) is not None:
             m[field] = row[field]
+    # Пульс и основной обмен — целые: колонки SmallInteger, а весы отдают float.
+    for field in ("heart_rate", "bmr_kcal"):
+        if row.get(field) is not None:
+            m[field] = round(row[field])
     return m
 
 

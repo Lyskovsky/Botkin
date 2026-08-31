@@ -628,6 +628,10 @@ def upsert_device_weight(
     bmi: Optional[float] = None,
     visceral_fat: Optional[int] = None,
     bone_mass: Optional[float] = None,
+    heart_rate: Optional[int] = None,
+    bmr_kcal: Optional[int] = None,
+    fat_mass_kg: Optional[float] = None,
+    lean_mass_kg: Optional[float] = None,
     source: str = "agent_api",
 ) -> bool:
     """Идемпотентно записать замер с весов по ключу (user_id, measured_at).
@@ -669,6 +673,10 @@ def upsert_device_weight(
                 bmi=bmi,
                 visceral_fat=visceral_fat,
                 bone_mass=bone_mass,
+                heart_rate=heart_rate,
+                bmr_kcal=bmr_kcal,
+                fat_mass_kg=fat_mass_kg,
+                lean_mass_kg=lean_mass_kg,
                 source=source,
             )
         )
@@ -687,6 +695,10 @@ def upsert_device_weight(
         ("bmi", bmi),
         ("visceral_fat", visceral_fat),
         ("bone_mass", bone_mass),
+        ("heart_rate", heart_rate),
+        ("bmr_kcal", bmr_kcal),
+        ("fat_mass_kg", fat_mass_kg),
+        ("lean_mass_kg", lean_mass_kg),
     ):
         if value is not None:
             setattr(existing, field, value)
