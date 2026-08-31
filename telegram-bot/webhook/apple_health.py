@@ -793,6 +793,139 @@ def _insert_new_workouts(db, user_id: int, rows: list[dict]) -> int:
     return inserted
 
 
+# ── ЭКГ (HAE data.ecg[]) ──────────────────────────────────────────────────────
+# Apple отдаёт ЭКГ метаданными + ~15 000 точек вольтажа на 30-секундную запись.
+# Сырой сигнал НЕ храним (см. docstring модели EcgRecord): в базу идут только
+# время, длительность, средний пульс, классификация ритма и число точек.
+
+# Классификация приходит в разном написании: "sinusRhythm" (HealthKit),
+# "Sinus Rhythm" (HAE-экспорт). Оставляем строку как есть — список значений
+# расширяется с версиями watchOS, и терять новые нельзя.
+
+
+def _hae_ecg_classification(rec: dict) -> str | None:
+    raw = _hae_pick(rec, "classification", "rhythmClassification", "type")
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    return text[:64] or None
+
+
+def _hae_ecg_symptoms(rec: dict) -> str | None:
+    """Симптомы: список или строка. 'None'/'none' от HAE трактуем как отсутствие."""
+    raw = _hae_pick(rec, "symptoms", "symptomsStatus")
+    if isinstance(raw, list):
+        items = [str(x).strip() for x in raw if str(x).strip()]
+        text = ", ".join(items)
+    elif raw is None:
+        return None
+    else:
+        text = str(raw).strip()
+    if not text or text.lower() in ("none", "not set", "нет"):
+        return None
+    return text[:255]
+
+
+def _hae_ecg_to_rows(ecg: list[dict], user_id: int) -> list[dict]:
+    """HAE `data.ecg[]` → строки для таблицы `ecg_records`.
+
+    Запись без распознаваемого времени старта пропускаем: без него нет ни ключа
+    дедупа, ни смысла в самой записи. Длительность берём из `duration`, а если
+    её нет — считаем по интервалу start/end (как для тренировок).
+    """
+    rows: list[dict] = []
+    for rec in ecg:
+        if not isinstance(rec, dict):
+            continue
+        start_raw = _hae_pick(rec, "start", "startDate", "date")
+        try:
+            start_dt = datetime.strptime(str(start_raw), _WORKOUT_DATE_FMT)
+        except (TypeError, ValueError):
+            continue
+        end_raw = _hae_pick(rec, "end", "endDate")
+        try:
+            end_dt = datetime.strptime(str(end_raw), _WORKOUT_DATE_FMT)
+        except (TypeError, ValueError):
+            end_dt = None
+
+        dur_raw = rec.get("duration")
+        duration_sec = _hae_quantity(dur_raw)
+        if duration_sec is not None and isinstance(dur_raw, dict):
+            # HAE присылает секунды, но единицы декларирует по-разному.
+            units = str(dur_raw.get("units") or "").lower()
+            if units.startswith("min"):
+                duration_sec *= 60
+            elif units.startswith("h"):
+                duration_sec *= 3600
+        if duration_sec is None and end_dt is not None:
+            duration_sec = (end_dt - start_dt).total_seconds()
+
+        avg_hr = _hae_quantity(_hae_pick(rec, "averageHeartRate", "avgHeartRate", "heartRate"))
+        sampling = _hae_quantity(_hae_pick(rec, "samplingFrequency", "samplingRate"))
+        samples = _hae_quantity(_hae_pick(rec, "numberOfVoltageMeasurements", "voltageMeasurementsCount"))
+        # Если счётчика нет — берём длину массива, а сам массив дальше не тащим.
+        if samples is None and isinstance(rec.get("voltageMeasurements"), list):
+            samples = len(rec["voltageMeasurements"])
+
+        ecg_id = rec.get("id")
+        source = f"hae_ecg_{ecg_id}" if ecg_id else f"hae_ecg_{start_dt.isoformat()}"
+
+        rows.append(
+            {
+                "user_id": user_id,
+                "recorded_at": start_dt,
+                "classification": _hae_ecg_classification(rec),
+                "average_heart_rate": round(avg_hr) if avg_hr is not None else None,
+                "duration_sec": round(duration_sec) if duration_sec is not None else None,
+                "sampling_hz": round(sampling, 1) if sampling is not None else None,
+                "voltage_samples": round(samples) if samples is not None else None,
+                "symptoms": _hae_ecg_symptoms(rec),
+                "device": (str(_hae_pick(rec, "device", "sourceName") or "") or None),
+                "source": source[:120],
+            }
+        )
+    return rows
+
+
+def _insert_new_ecg(db, user_id: int, rows: list[dict]) -> int:
+    """Вставляет ЭКГ в `ecg_records`, пропуская уже известные по `source`.
+
+    Дедуп на уровне приложения — так же, как для тренировок: HAE присылает
+    последние записи повторно при каждом экспорте.
+    """
+    if not rows:
+        return 0
+    from sqlalchemy import text as _text
+
+    sources = [r["source"] for r in rows]
+    existing = {
+        row[0]
+        for row in db.execute(
+            _text("SELECT source FROM ecg_records WHERE user_id = :uid AND source = ANY(:srcs)"),
+            {"uid": user_id, "srcs": sources},
+        )
+    }
+    inserted = 0
+    for r in rows:
+        if r["source"] in existing:
+            continue
+        db.execute(
+            _text(
+                """INSERT INTO ecg_records
+                   (user_id, recorded_at, classification, average_heart_rate, duration_sec,
+                    sampling_hz, voltage_samples, symptoms, device, source)
+                   VALUES (:user_id, :recorded_at, :classification, :average_heart_rate,
+                           :duration_sec, :sampling_hz, :voltage_samples, :symptoms,
+                           :device, :source)
+                   ON CONFLICT DO NOTHING"""
+            ),
+            r,
+        )
+        existing.add(r["source"])
+        inserted += 1
+    return inserted
+
+
 @app.post("/apple_health_v2")
 async def receive_apple_health_v2(
     request: Request,
@@ -825,10 +958,14 @@ async def receive_apple_health_v2(
     workouts_raw = data_block.get("workouts") or []
     if not isinstance(workouts_raw, list):
         raise HTTPException(status_code=400, detail="'data.workouts' must be a list")
+    # ЭКГ — тоже отдельный тип экспорта и отдельный POST с data.ecg[].
+    ecg_raw = data_block.get("ecg") or []
+    if not isinstance(ecg_raw, list):
+        raise HTTPException(status_code=400, detail="'data.ecg' must be a list")
 
     daily = _hae_to_daily_payloads(metrics)
-    if not daily and not workouts_raw:
-        return {"status": "ok", "days": 0, "details": [], "workouts_inserted": 0}
+    if not daily and not workouts_raw and not ecg_raw:
+        return {"status": "ok", "days": 0, "details": [], "workouts_inserted": 0, "ecg_inserted": 0}
 
     # Resolve target user (та же логика, что в v1)
     import sys
@@ -968,6 +1105,12 @@ async def receive_apple_health_v2(
         if workouts_inserted:
             logger.info("HAE_v2 workouts inserted: %s", workouts_inserted)
 
+        # ЭКГ: метаданные записей Apple Watch, сырой сигнал не храним.
+        ecg_rows = _hae_ecg_to_rows(ecg_raw, target_user_id)
+        ecg_inserted = _insert_new_ecg(db, target_user_id, ecg_rows)
+        if ecg_inserted:
+            logger.info("HAE_v2 ecg inserted: %s", ecg_inserted)
+
         db.commit()
     except Exception as e:
         db.rollback()
@@ -982,6 +1125,7 @@ async def receive_apple_health_v2(
         "days": len(daily),
         "details": details,
         "workouts_inserted": workouts_inserted,
+        "ecg_inserted": ecg_inserted,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
