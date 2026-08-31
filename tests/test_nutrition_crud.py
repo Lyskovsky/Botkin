@@ -168,7 +168,10 @@ def test_get_recent_product_names_reads_bot_dialect(test_db):
     create_nutrition_log(
         test_db,
         user_id=895655,
-        date=date(2026, 6, 1),
+        # Дата ОТНОСИТЕЛЬНО сегодня: get_recent_product_names смотрит на
+        # lookback_days=90, и захардкоженная дата рано или поздно выпадает из
+        # окна — так этот тест и сломался 30.08.2026 (1 июня стало 91 днём назад).
+        date=date.today() - timedelta(days=7),
         meal_time=time(13, 0),
         meal_name="Обед",
         items=[

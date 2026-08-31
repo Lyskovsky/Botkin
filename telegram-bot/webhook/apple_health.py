@@ -463,6 +463,62 @@ def _hae_pick(rec: dict, *keys, default=None):
     return default
 
 
+_KCAL_PER_MJ = 239.006
+_KJ_PER_KCAL = 4.184
+# Ниже этой суточной суммы в «кДж» подозреваем мислейбл МДж (см. _energy_to_kcal).
+_MJ_MISLABEL_MAX_KJ = 100.0
+
+
+def _energy_to_kcal(qty: float, units: str, points: int = 1, label: str = "energy") -> float:
+    """Сумма энергии за день (в исходных units) → ккал.
+
+    Известный баг HAE: приложение присылает МЕГАджоули, подписывая их как "kJ".
+    Признак — неправдоподобно малое суточное значение: 5,9 кДж это 1,4 ккал (не
+    бывает даже за минуту сна), а 5,9 МДж = 1400 ккал — нормальный базовый обмен.
+
+    ⚠️ Конвертируем СУММУ за день, а НЕ каждую запись. Энергия приходит минутными
+    интервалами, и на отдельном куске порог «<100» срабатывает всегда — именно так
+    базовый обмен превращался в миллионы ккал (bmr_calories 16–21.08.2026: 1,9 млн
+    вместо 2100).
+
+    ⚠️ И порог применяем только к ОДИНОЧНОЙ записи: мислейбл МДж приходит суточным
+    агрегатом, то есть одной точкой. Много точек с малой суммой — это честный
+    частичный день (неполная синхронизация), множить его на 239 нельзя: 21 кДж
+    (~5 ккал) превращались в 5019 ккал. Переоценка травит TDEE и цель по калориям,
+    тогда как недооценка видна как дырка в данных — поэтому в спорном случае
+    трактуем буквально и пишем в лог.
+    """
+    if units == "mj":
+        return round(qty * _KCAL_PER_MJ, 1)
+    if units == "kj":
+        if qty < _MJ_MISLABEL_MAX_KJ:
+            if points <= 1:
+                return round(qty * _KCAL_PER_MJ, 1)  # мислейбл HAE: это МДж
+            logger.warning(
+                "HAE %s: %.3f кДж за %d записей — частичный день, эвристику МДж не применяю (трактую буквально)",
+                label,
+                qty,
+                points,
+            )
+        return round(qty / _KJ_PER_KCAL, 1)
+    return round(qty, 1)  # kcal как есть
+
+
+def _add_energy(slot: dict, key: str, units: str, qty) -> None:
+    """Накопить энергию в ИСХОДНЫХ единицах, РАЗДЕЛЬНО по units.
+
+    Раздельно — потому что в одном дне могут встретиться записи в разных единицах
+    (пользователь сменил настройку HAE, или две автоматизации шлют по-разному).
+    Складывать kcal с kJ в одно число до конверсии нельзя: 1000 kcal + 4184 kJ
+    (это ещё 1000 ккал) давали 1239 вместо 2000 — молча, без ошибки.
+
+    Число точек храним, чтобы отличить суточный агрегат от нарезки интервалами.
+    """
+    bucket = slot.setdefault(key, {}).setdefault(units, {"sum": 0.0, "points": 0})
+    bucket["sum"] += float(qty)
+    bucket["points"] += 1
+
+
 def _hae_to_daily_payloads(metrics: list[dict]) -> dict[str, AppleHealthPayload]:
     """Сгруппировать HAE metrics → {YYYY-MM-DD: AppleHealthPayload}.
 
@@ -501,25 +557,11 @@ def _hae_to_daily_payloads(metrics: list[dict]) -> dict[str, AppleHealthPayload]
                     _hae_pick(rec, "qty", "Avg", default=0)
                 )
             elif name in ("active_energy", "active_energy_burned"):
-                qty = float(_hae_pick(rec, "qty", "Avg", default=0))
-                # HAE баг: шлёт МДж (MJ), но пишет units="kJ".
-                # Признак: значение < 100 при units=kJ → трактуем как MJ.
-                # 5.858 "kJ" → 5.858 МДж × 239 = 1399 ккал (реалистично).
-                if units == "mj" or (units == "kj" and qty < 100):
-                    qty = round(qty * 239.006, 1)  # MJ → kcal
-                elif units == "kj":
-                    qty = round(qty / 4.184, 1)  # kJ → kcal
-                slot["active_energy_kcal"] = round(float(slot.get("active_energy_kcal") or 0) + qty, 1)
+                # Копим в ИСХОДНЫХ единицах; конверсия — один раз к суточной сумме
+                # (см. _energy_to_kcal: иначе минутные интервалы дают миллионы ккал).
+                _add_energy(slot, "_active_raw", units, _hae_pick(rec, "qty", "Avg", default=0))
             elif name in ("basal_energy_burned", "resting_energy"):
-                qty = float(_hae_pick(rec, "qty", "Avg", default=0))
-                # HAE баг: шлёт МДж (MJ), но пишет units="kJ".
-                # Признак: значение < 100 при units=kJ → трактуем как MJ.
-                # 5.858 "kJ" → 5.858 МДж × 239 = 1399 ккал (реалистично).
-                if units == "mj" or (units == "kj" and qty < 100):
-                    qty = round(qty * 239.006, 1)  # MJ → kcal
-                elif units == "kj":
-                    qty = round(qty / 4.184, 1)  # kJ → kcal
-                slot["basal_energy_kcal"] = round(float(slot.get("basal_energy_kcal") or 0) + qty, 1)
+                _add_energy(slot, "_basal_raw", units, _hae_pick(rec, "qty", "Avg", default=0))
             elif name == "heart_rate":
                 if "Avg" in rec and rec["Avg"] is not None:
                     slot["heart_rate_avg"] = int(round(float(rec["Avg"])))
@@ -635,6 +677,17 @@ def _hae_to_daily_payloads(metrics: list[dict]) -> dict[str, AppleHealthPayload]
                     slot["spo2_pct"] = round(float(v), 1)
 
     # Преобразуем dict-ы в pydantic AppleHealthPayload (для валидации)
+    # Энергию конвертируем ПОСЛЕ суммирования: служебные ключи в payload не нужны.
+    # Каждая группа units конвертируется своим правилом, и только потом складываем.
+    for fields in by_date.values():
+        for raw_key, out_key in (("_active_raw", "active_energy_kcal"), ("_basal_raw", "basal_energy_kcal")):
+            buckets = fields.pop(raw_key, None)
+            if not buckets:
+                continue
+            fields[out_key] = round(
+                sum(_energy_to_kcal(b["sum"], u, b["points"], out_key) for u, b in buckets.items()), 1
+            )
+
     return {d: AppleHealthPayload(**fields) for d, fields in by_date.items()}
 
 
@@ -793,6 +846,139 @@ def _insert_new_workouts(db, user_id: int, rows: list[dict]) -> int:
     return inserted
 
 
+# ── ЭКГ (HAE data.ecg[]) ──────────────────────────────────────────────────────
+# Apple отдаёт ЭКГ метаданными + ~15 000 точек вольтажа на 30-секундную запись.
+# Сырой сигнал НЕ храним (см. docstring модели EcgRecord): в базу идут только
+# время, длительность, средний пульс, классификация ритма и число точек.
+
+# Классификация приходит в разном написании: "sinusRhythm" (HealthKit),
+# "Sinus Rhythm" (HAE-экспорт). Оставляем строку как есть — список значений
+# расширяется с версиями watchOS, и терять новые нельзя.
+
+
+def _hae_ecg_classification(rec: dict) -> str | None:
+    raw = _hae_pick(rec, "classification", "rhythmClassification", "type")
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    return text[:64] or None
+
+
+def _hae_ecg_symptoms(rec: dict) -> str | None:
+    """Симптомы: список или строка. 'None'/'none' от HAE трактуем как отсутствие."""
+    raw = _hae_pick(rec, "symptoms", "symptomsStatus")
+    if isinstance(raw, list):
+        items = [str(x).strip() for x in raw if str(x).strip()]
+        text = ", ".join(items)
+    elif raw is None:
+        return None
+    else:
+        text = str(raw).strip()
+    if not text or text.lower() in ("none", "not set", "нет"):
+        return None
+    return text[:255]
+
+
+def _hae_ecg_to_rows(ecg: list[dict], user_id: int) -> list[dict]:
+    """HAE `data.ecg[]` → строки для таблицы `ecg_records`.
+
+    Запись без распознаваемого времени старта пропускаем: без него нет ни ключа
+    дедупа, ни смысла в самой записи. Длительность берём из `duration`, а если
+    её нет — считаем по интервалу start/end (как для тренировок).
+    """
+    rows: list[dict] = []
+    for rec in ecg:
+        if not isinstance(rec, dict):
+            continue
+        start_raw = _hae_pick(rec, "start", "startDate", "date")
+        try:
+            start_dt = datetime.strptime(str(start_raw), _WORKOUT_DATE_FMT)
+        except (TypeError, ValueError):
+            continue
+        end_raw = _hae_pick(rec, "end", "endDate")
+        try:
+            end_dt = datetime.strptime(str(end_raw), _WORKOUT_DATE_FMT)
+        except (TypeError, ValueError):
+            end_dt = None
+
+        dur_raw = rec.get("duration")
+        duration_sec = _hae_quantity(dur_raw)
+        if duration_sec is not None and isinstance(dur_raw, dict):
+            # HAE присылает секунды, но единицы декларирует по-разному.
+            units = str(dur_raw.get("units") or "").lower()
+            if units.startswith("min"):
+                duration_sec *= 60
+            elif units.startswith("h"):
+                duration_sec *= 3600
+        if duration_sec is None and end_dt is not None:
+            duration_sec = (end_dt - start_dt).total_seconds()
+
+        avg_hr = _hae_quantity(_hae_pick(rec, "averageHeartRate", "avgHeartRate", "heartRate"))
+        sampling = _hae_quantity(_hae_pick(rec, "samplingFrequency", "samplingRate"))
+        samples = _hae_quantity(_hae_pick(rec, "numberOfVoltageMeasurements", "voltageMeasurementsCount"))
+        # Если счётчика нет — берём длину массива, а сам массив дальше не тащим.
+        if samples is None and isinstance(rec.get("voltageMeasurements"), list):
+            samples = len(rec["voltageMeasurements"])
+
+        ecg_id = rec.get("id")
+        source = f"hae_ecg_{ecg_id}" if ecg_id else f"hae_ecg_{start_dt.isoformat()}"
+
+        rows.append(
+            {
+                "user_id": user_id,
+                "recorded_at": start_dt,
+                "classification": _hae_ecg_classification(rec),
+                "average_heart_rate": round(avg_hr) if avg_hr is not None else None,
+                "duration_sec": round(duration_sec) if duration_sec is not None else None,
+                "sampling_hz": round(sampling, 1) if sampling is not None else None,
+                "voltage_samples": round(samples) if samples is not None else None,
+                "symptoms": _hae_ecg_symptoms(rec),
+                "device": (str(_hae_pick(rec, "device", "sourceName") or "") or None),
+                "source": source[:120],
+            }
+        )
+    return rows
+
+
+def _insert_new_ecg(db, user_id: int, rows: list[dict]) -> int:
+    """Вставляет ЭКГ в `ecg_records`, пропуская уже известные по `source`.
+
+    Дедуп на уровне приложения — так же, как для тренировок: HAE присылает
+    последние записи повторно при каждом экспорте.
+    """
+    if not rows:
+        return 0
+    from sqlalchemy import text as _text
+
+    sources = [r["source"] for r in rows]
+    existing = {
+        row[0]
+        for row in db.execute(
+            _text("SELECT source FROM ecg_records WHERE user_id = :uid AND source = ANY(:srcs)"),
+            {"uid": user_id, "srcs": sources},
+        )
+    }
+    inserted = 0
+    for r in rows:
+        if r["source"] in existing:
+            continue
+        db.execute(
+            _text(
+                """INSERT INTO ecg_records
+                   (user_id, recorded_at, classification, average_heart_rate, duration_sec,
+                    sampling_hz, voltage_samples, symptoms, device, source)
+                   VALUES (:user_id, :recorded_at, :classification, :average_heart_rate,
+                           :duration_sec, :sampling_hz, :voltage_samples, :symptoms,
+                           :device, :source)
+                   ON CONFLICT DO NOTHING"""
+            ),
+            r,
+        )
+        existing.add(r["source"])
+        inserted += 1
+    return inserted
+
+
 @app.post("/apple_health_v2")
 async def receive_apple_health_v2(
     request: Request,
@@ -825,10 +1011,14 @@ async def receive_apple_health_v2(
     workouts_raw = data_block.get("workouts") or []
     if not isinstance(workouts_raw, list):
         raise HTTPException(status_code=400, detail="'data.workouts' must be a list")
+    # ЭКГ — тоже отдельный тип экспорта и отдельный POST с data.ecg[].
+    ecg_raw = data_block.get("ecg") or []
+    if not isinstance(ecg_raw, list):
+        raise HTTPException(status_code=400, detail="'data.ecg' must be a list")
 
     daily = _hae_to_daily_payloads(metrics)
-    if not daily and not workouts_raw:
-        return {"status": "ok", "days": 0, "details": [], "workouts_inserted": 0}
+    if not daily and not workouts_raw and not ecg_raw:
+        return {"status": "ok", "days": 0, "details": [], "workouts_inserted": 0, "ecg_inserted": 0}
 
     # Resolve target user (та же логика, что в v1)
     import sys
@@ -968,6 +1158,12 @@ async def receive_apple_health_v2(
         if workouts_inserted:
             logger.info("HAE_v2 workouts inserted: %s", workouts_inserted)
 
+        # ЭКГ: метаданные записей Apple Watch, сырой сигнал не храним.
+        ecg_rows = _hae_ecg_to_rows(ecg_raw, target_user_id)
+        ecg_inserted = _insert_new_ecg(db, target_user_id, ecg_rows)
+        if ecg_inserted:
+            logger.info("HAE_v2 ecg inserted: %s", ecg_inserted)
+
         db.commit()
     except Exception as e:
         db.rollback()
@@ -982,6 +1178,7 @@ async def receive_apple_health_v2(
         "days": len(daily),
         "details": details,
         "workouts_inserted": workouts_inserted,
+        "ecg_inserted": ecg_inserted,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
