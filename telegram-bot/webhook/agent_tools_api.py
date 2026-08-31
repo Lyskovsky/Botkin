@@ -213,6 +213,22 @@ class BodyCompositionMeasurement(BaseModel):
     lean_mass_kg: Optional[float] = Field(None, ge=0, le=200, description="Безжировая масса, кг")
 
 
+def bmi_from_height(weight_kg: float, height_cm: float | None) -> float | None:
+    """ИМТ из веса и роста профиля. None, если роста нет или он неправдоподобен.
+
+    Весы Withings ИМТ не присылают вовсе (в measuregrps его нет), а рост они и не
+    знают — он есть только в профиле пользователя. Поэтому считаем на сервере:
+    так значение появится у любого канала, который прислал вес без ИМТ.
+    """
+    # isinstance, а не просто truthiness: в профиле может лежать что угодно
+    # (или мок в тестах), а сравнение с не-числом роняет весь запрос.
+    if not isinstance(height_cm, (int, float)) or isinstance(height_cm, bool):
+        return None
+    if not (100 <= height_cm <= 250):
+        return None
+    return round(weight_kg / (height_cm / 100) ** 2, 1)
+
+
 class LogBodyCompositionRequest(BaseModel):
     measurements: list[BodyCompositionMeasurement] = Field(
         ..., min_length=1, max_length=500, description="Батч замеров (импорт истории — одним запросом)"
@@ -817,7 +833,8 @@ async def log_body_composition(
             body_fat=m.body_fat,
             muscle_mass=m.muscle_mass,
             water=m.water,
-            bmi=m.bmi,
+            # ИМТ считаем сами, если канал его не прислал: рост знает только профиль.
+            bmi=m.bmi if m.bmi is not None else bmi_from_height(m.weight, getattr(user, "height_cm", None)),
             # Колонка visceral_fat — INTEGER, весы отдают float
             visceral_fat=round(m.visceral_fat) if m.visceral_fat is not None else None,
             bone_mass=m.bone_mass,

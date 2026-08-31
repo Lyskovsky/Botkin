@@ -397,3 +397,34 @@ def test_implausible_date_rejected(client, db_session, measured_at):
     )
     assert r.status_code == 422, r.text
     assert not _rows(db_session)
+
+
+# ── ИМТ считается из роста профиля (весы его не присылают) ────────────────────
+
+
+def test_bmi_from_height_typical():
+    from webhook.agent_tools_api import bmi_from_height
+
+    assert bmi_from_height(105.2, 178) == 33.2
+
+
+def test_bmi_from_height_none_without_height():
+    from webhook.agent_tools_api import bmi_from_height
+
+    assert bmi_from_height(105.2, None) is None
+
+
+def test_bmi_from_height_rejects_implausible_height():
+    """Рост в метрах или опечатка не должны давать «ИМТ 33 000»."""
+    from webhook.agent_tools_api import bmi_from_height
+
+    assert bmi_from_height(105.2, 1.78) is None
+    assert bmi_from_height(105.2, 17800) is None
+
+
+def test_bmi_from_height_ignores_non_numeric():
+    """В профиле может лежать что угодно — сравнение с не-числом роняло запрос."""
+    from webhook.agent_tools_api import bmi_from_height
+
+    assert bmi_from_height(105.2, "178") is None
+    assert bmi_from_height(105.2, object()) is None
