@@ -181,3 +181,19 @@ def test_explicit_bpm_fields_win_over_array():
 def test_garbage_in_heart_rate_data_ignored():
     rec = dict(REAL, heartRateData=["строка", None, {"qty": 0}, {"qty": 99}])
     assert _hae_hr_events_to_rows([rec], USER)[0]["max_bpm"] == 99
+
+
+def test_source_as_object_takes_name():
+    """В уведомлениях о пульсе source — объект {name, identifier}, а не строка."""
+    rec = dict(REAL, source={"name": "Apple Watch — Андрей", "identifier": "com.apple.NanoHeartRhythm"})
+    assert _hae_hr_events_to_rows([rec], USER)[0]["device"] == "Apple Watch — Андрей"
+
+
+def test_source_object_without_name_falls_back_to_identifier():
+    rec = dict(REAL, source={"identifier": "com.apple.NanoHeartRhythm"})
+    assert _hae_hr_events_to_rows([rec], USER)[0]["device"] == "com.apple.NanoHeartRhythm"
+
+
+def test_source_as_plain_string_still_works():
+    rec = dict(REAL, source="Часы Андрея")
+    assert _hae_hr_events_to_rows([rec], USER)[0]["device"] == "Часы Андрея"

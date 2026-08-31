@@ -224,3 +224,9 @@ def test_russian_classification_kept():
     """HAE локализует заключение — «Синусовый ритм» должен сохраниться как есть."""
     rec = {"start": "2026-08-31 17:35:00 +0300", "classification": "Синусовый ритм"}
     assert _hae_ecg_to_rows([rec], USER)[0]["classification"] == "Синусовый ритм"
+
+
+def test_ecg_source_as_object_takes_name():
+    """Для ЭКГ source приходит строкой, но формат может измениться — объект тоже разбираем."""
+    rec = dict(FULL, source={"name": "Apple Watch — Андрей"}, device=None)
+    assert _hae_ecg_to_rows([rec], USER)[0]["device"] == "Apple Watch — Андрей"
