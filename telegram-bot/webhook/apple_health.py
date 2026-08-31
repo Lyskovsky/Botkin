@@ -880,6 +880,23 @@ def payload_shape(data_block: dict) -> dict:
 # расширяется с версиями watchOS, и терять новые нельзя.
 
 
+def _hae_source_name(rec: dict) -> str | None:
+    """Имя источника данных: строка или объект {name, identifier}.
+
+    В блоке ЭКГ `source` приходит строкой («ЭКГ»), а в уведомлениях о пульсе —
+    словарём вида {'name': 'Apple Watch — Андрей', 'identifier': 'com.apple…'}
+    (проверено живым экспортом 31.08). Без разбора в колонку `device` попадал
+    питоновский repr словаря целиком.
+    """
+    raw = _hae_pick(rec, "device", "sourceName", "source")
+    if isinstance(raw, dict):
+        raw = raw.get("name") or raw.get("identifier")
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    return text[:64] or None
+
+
 def _hae_ecg_classification(rec: dict) -> str | None:
     raw = _hae_pick(rec, "classification", "rhythmClassification", "type")
     if raw is None:
@@ -944,10 +961,9 @@ def _hae_ecg_to_rows(ecg: list[dict], user_id: int) -> list[dict]:
         if samples is None and isinstance(rec.get("voltageMeasurements"), list):
             samples = len(rec["voltageMeasurements"])
 
-        # Поля device в пакете нет — HAE кладёт имя устройства в source
+        # Поля device в пакете нет — HAE кладёт источник в source
         # (проверено живым запросом 31.08: ecg[0].keys было без device).
-        device_raw = _hae_pick(rec, "device", "sourceName", "source")
-        device = str(device_raw)[:64] if device_raw else None
+        device = _hae_source_name(rec)
 
         ecg_id = rec.get("id")
         source = f"hae_ecg_{ecg_id}" if ecg_id else f"hae_ecg_{start_dt.isoformat()}"
@@ -1085,7 +1101,6 @@ def _hae_hr_events_to_rows(events: list[dict], user_id: int) -> list[dict]:
                 if val:
                     samples.append(val)
 
-        device_raw = _hae_pick(rec, "device", "sourceName", "source")
         rows.append(
             {
                 "user_id": user_id,
@@ -1098,7 +1113,7 @@ def _hae_hr_events_to_rows(events: list[dict], user_id: int) -> list[dict]:
                 "avg_bpm": _bpm("averageHeartRate", "avgHeartRate", "heartRate", "avg")
                 or (round(sum(samples) / len(samples)) if samples else None),
                 "duration_min": round(duration_min) if duration_min is not None else None,
-                "device": str(device_raw)[:64] if device_raw else None,
+                "device": _hae_source_name(rec),
                 "source": f"hae_hrn_{start_dt.isoformat()}"[:120],
             }
         )
