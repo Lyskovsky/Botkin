@@ -127,3 +127,57 @@ def test_three_morning_events_parsed():
 def test_long_type_truncated():
     rec = {"start": "2026-08-31 11:21:00 +0300", "type": "т" * 100}
     assert len(_hae_hr_events_to_rows([rec], USER)[0]["event_type"]) == 32
+
+
+# ── фактическая форма пакета (проверена живым экспортом 31.08) ─────────────────
+
+# payload_shape показал: keys = [end, heartNotification, heartRateData, source, start, threshold].
+# Отдельных полей min/max нет — пульс лежит массивом.
+REAL = {
+    "start": "2026-08-31 12:19:00 +0300",
+    "end": "2026-08-31 12:29:00 +0300",
+    "heartNotification": "HKHeartRateNotificationTypeHigh",
+    "threshold": {"qty": 100, "units": "count/min"},
+    "source": "Часы Андрея",
+    "heartRateData": [
+        {"date": "2026-08-31 12:19:00 +0300", "qty": 101},
+        {"date": "2026-08-31 12:24:00 +0300", "qty": 107},
+        {"date": "2026-08-31 12:28:00 +0300", "qty": 104},
+    ],
+}
+
+
+def test_real_shape_type_from_heart_notification():
+    assert _hae_hr_events_to_rows([REAL], USER)[0]["event_type"] == "High"
+
+
+def test_real_shape_bpm_from_heart_rate_data():
+    row = _hae_hr_events_to_rows([REAL], USER)[0]
+    assert (row["min_bpm"], row["max_bpm"], row["avg_bpm"]) == (101, 107, 104)
+
+
+def test_real_shape_threshold_as_dict():
+    assert _hae_hr_events_to_rows([REAL], USER)[0]["threshold_bpm"] == 100
+
+
+def test_heart_rate_data_with_min_max_avg_fields():
+    """Вторая возможная форма точки: {Min, Max, Avg} вместо qty."""
+    rec = dict(REAL, heartRateData=[{"Min": 98, "Max": 112, "Avg": 105}])
+    row = _hae_hr_events_to_rows([rec], USER)[0]
+    assert row["min_bpm"] == 98 and row["max_bpm"] == 112
+
+
+def test_empty_heart_rate_data_leaves_bpm_none():
+    rec = dict(REAL, heartRateData=[])
+    row = _hae_hr_events_to_rows([rec], USER)[0]
+    assert row["min_bpm"] is None and row["max_bpm"] is None and row["avg_bpm"] is None
+
+
+def test_explicit_bpm_fields_win_over_array():
+    rec = dict(REAL, maxHeartRate=120)
+    assert _hae_hr_events_to_rows([rec], USER)[0]["max_bpm"] == 120
+
+
+def test_garbage_in_heart_rate_data_ignored():
+    rec = dict(REAL, heartRateData=["строка", None, {"qty": 0}, {"qty": 99}])
+    assert _hae_hr_events_to_rows([rec], USER)[0]["max_bpm"] == 99
