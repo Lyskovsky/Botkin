@@ -1009,6 +1009,119 @@ def _insert_new_ecg(db, user_id: int, rows: list[dict]) -> int:
     return processed
 
 
+# ── Уведомления о пульсе (HAE «Уведомления о пульсе») ─────────────────────────
+# Часы присылают событие, когда пульс покоя держится вне порога дольше 10 минут.
+# Имя блока в HAE документировано плохо — как и с ЭКГ, принимаем все варианты,
+# а payload_shape() в логе покажет фактическое.
+
+_HR_EVENT_KEYS = (
+    "heartRateNotifications",
+    "heart_rate_notifications",
+    "heartRateEvents",
+    "heart_rate_events",
+    "hrNotifications",
+)
+
+
+def _hae_hr_event_type(rec: dict) -> str | None:
+    """Тип события: high/low/irregular или локализованная строка. Не нормализуем."""
+    raw = _hae_pick(rec, "type", "notificationType", "classification", "name")
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    # HKHeartRateNotificationTypeHigh → High: префикс HealthKit не несёт смысла.
+    prefix = "HKHeartRateNotificationType"
+    if text.startswith(prefix):
+        text = text[len(prefix) :]
+    return text[:32] or None
+
+
+def _hae_hr_events_to_rows(events: list[dict], user_id: int) -> list[dict]:
+    """HAE-блок уведомлений о пульсе → строки для `heart_rate_events`.
+
+    Событие без распознаваемого времени старта пропускаем: без него нет ни ключа
+    дедупа, ни смысла. Длительность берём из `duration`, иначе из интервала.
+    """
+    rows: list[dict] = []
+    for rec in events:
+        if not isinstance(rec, dict):
+            continue
+        start_raw = _hae_pick(rec, "start", "startDate", "date")
+        try:
+            start_dt = datetime.strptime(str(start_raw), _WORKOUT_DATE_FMT)
+        except (TypeError, ValueError):
+            continue
+        end_raw = _hae_pick(rec, "end", "endDate")
+        try:
+            end_dt = datetime.strptime(str(end_raw), _WORKOUT_DATE_FMT)
+        except (TypeError, ValueError):
+            end_dt = None
+
+        dur_raw = rec.get("duration")
+        duration_min = _hae_quantity(dur_raw)
+        if duration_min is not None and isinstance(dur_raw, dict):
+            units = str(dur_raw.get("units") or "").lower()
+            if not units.startswith("min"):
+                duration_min = duration_min / 60 if units.startswith("s") else duration_min * 60
+        elif duration_min is not None:
+            duration_min = duration_min / 60  # голое число = секунды
+        if duration_min is None and end_dt is not None:
+            duration_min = (end_dt - start_dt).total_seconds() / 60
+
+        def _bpm(*keys):
+            val = _hae_quantity(_hae_pick(rec, *keys))
+            return round(val) if val else None
+
+        device_raw = _hae_pick(rec, "device", "sourceName", "source")
+        rows.append(
+            {
+                "user_id": user_id,
+                "started_at": start_dt,
+                "ended_at": end_dt,
+                "event_type": _hae_hr_event_type(rec),
+                "threshold_bpm": _bpm("threshold", "thresholdHeartRate", "heartRateThreshold"),
+                "min_bpm": _bpm("minHeartRate", "heartRateMin", "min"),
+                "max_bpm": _bpm("maxHeartRate", "heartRateMax", "max"),
+                "avg_bpm": _bpm("averageHeartRate", "avgHeartRate", "heartRate", "avg"),
+                "duration_min": round(duration_min) if duration_min is not None else None,
+                "device": str(device_raw)[:64] if device_raw else None,
+                "source": f"hae_hrn_{start_dt.isoformat()}"[:120],
+            }
+        )
+    return rows
+
+
+def _insert_hr_events(db, user_id: int, rows: list[dict]) -> int:
+    """UPSERT событий пульса по (user_id, source) — как для ЭКГ."""
+    if not rows:
+        return 0
+    from sqlalchemy import text as _text
+
+    processed = 0
+    for r in rows:
+        db.execute(
+            _text(
+                """INSERT INTO heart_rate_events
+                   (user_id, started_at, ended_at, event_type, threshold_bpm, min_bpm,
+                    max_bpm, avg_bpm, duration_min, device, source)
+                   VALUES (:user_id, :started_at, :ended_at, :event_type, :threshold_bpm,
+                           :min_bpm, :max_bpm, :avg_bpm, :duration_min, :device, :source)
+                   ON CONFLICT (user_id, source) DO UPDATE SET
+                       ended_at = EXCLUDED.ended_at,
+                       event_type = EXCLUDED.event_type,
+                       threshold_bpm = EXCLUDED.threshold_bpm,
+                       min_bpm = EXCLUDED.min_bpm,
+                       max_bpm = EXCLUDED.max_bpm,
+                       avg_bpm = EXCLUDED.avg_bpm,
+                       duration_min = EXCLUDED.duration_min,
+                       device = EXCLUDED.device"""
+            ),
+            r,
+        )
+        processed += 1
+    return processed
+
+
 @app.post("/apple_health_v2")
 async def receive_apple_health_v2(
     request: Request,
@@ -1051,6 +1164,15 @@ async def receive_apple_health_v2(
     # ЭКГ — тоже отдельный тип экспорта и отдельный POST. Имя блока в разных
     # версиях HAE пишут по-разному, а документация противоречива — принимаем
     # все известные варианты, первый непустой.
+    hr_events_raw = []
+    for hr_key in _HR_EVENT_KEYS:
+        candidate = data_block.get(hr_key)
+        if isinstance(candidate, list) and candidate:
+            hr_events_raw = candidate
+            break
+        if candidate is not None and not isinstance(candidate, list):
+            raise HTTPException(status_code=400, detail=f"'data.{hr_key}' must be a list")
+
     ecg_raw = []
     for ecg_key in ("ecg", "ecgs", "electrocardiograms", "electrocardiogram"):
         candidate = data_block.get(ecg_key)
@@ -1061,8 +1183,15 @@ async def receive_apple_health_v2(
             raise HTTPException(status_code=400, detail=f"'data.{ecg_key}' must be a list")
 
     daily = _hae_to_daily_payloads(metrics)
-    if not daily and not workouts_raw and not ecg_raw:
-        return {"status": "ok", "days": 0, "details": [], "workouts_inserted": 0, "ecg_inserted": 0}
+    if not daily and not workouts_raw and not ecg_raw and not hr_events_raw:
+        return {
+            "status": "ok",
+            "days": 0,
+            "details": [],
+            "workouts_inserted": 0,
+            "ecg_inserted": 0,
+            "hr_events_inserted": 0,
+        }
 
     # Resolve target user (та же логика, что в v1)
     import sys
@@ -1208,6 +1337,13 @@ async def receive_apple_health_v2(
         if ecg_inserted:
             logger.info("HAE_v2 ecg inserted: %s", ecg_inserted)
 
+        # Уведомления о пульсе вне нормы в покое — нужны, чтобы сопоставлять
+        # эпизоды тахикардии с гликемией и с ЭКГ того же момента.
+        hr_event_rows = _hae_hr_events_to_rows(hr_events_raw, target_user_id)
+        hr_events_inserted = _insert_hr_events(db, target_user_id, hr_event_rows)
+        if hr_events_inserted:
+            logger.info("HAE_v2 heart rate events: %s", hr_events_inserted)
+
         db.commit()
     except Exception as e:
         db.rollback()
@@ -1223,6 +1359,7 @@ async def receive_apple_health_v2(
         "details": details,
         "workouts_inserted": workouts_inserted,
         "ecg_inserted": ecg_inserted,
+        "hr_events_inserted": hr_events_inserted,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
