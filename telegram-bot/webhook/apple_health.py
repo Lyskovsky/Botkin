@@ -846,6 +846,30 @@ def _insert_new_workouts(db, user_id: int, rows: list[dict]) -> int:
     return inserted
 
 
+def payload_shape(data_block: dict) -> dict:
+    """Форма входящего HAE-пакета: ключ → тип/размер, плюс имена полей первого элемента.
+
+    Нужна для диагностики: документация HAE противоречива, и как именно назван
+    блок с ЭКГ, выяснилось только по живому запросу (первая попытка 31.08 пришла
+    с пустым `metrics` и без распознанного блока).
+
+    ⚠️ Возвращаем ТОЛЬКО имена ключей и количества — никаких значений: это
+    медданные, и в логах им не место. Поля `metrics` не разворачиваем: их имена
+    уже логируются отдельной строкой.
+    """
+    shape: dict = {}
+    for key, value in (data_block or {}).items():
+        if isinstance(value, list):
+            shape[key] = f"list[{len(value)}]"
+            if key != "metrics" and value and isinstance(value[0], dict):
+                shape[f"{key}[0].keys"] = sorted(value[0].keys())
+        elif isinstance(value, dict):
+            shape[key] = f"dict({len(value)})"
+        else:
+            shape[key] = type(value).__name__
+    return shape
+
+
 # ── ЭКГ (HAE data.ecg[]) ──────────────────────────────────────────────────────
 # Apple отдаёт ЭКГ метаданными + ~15 000 точек вольтажа на 30-секундную запись.
 # Сырой сигнал НЕ храним (см. docstring модели EcgRecord): в базу идут только
@@ -1001,6 +1025,13 @@ async def receive_apple_health_v2(
     except Exception:
         pass
 
+    # Форма пакета: какие блоки пришли и как называются их поля. Без значений —
+    # только имена. Иначе неизвестный формат (как с ЭКГ) приходится угадывать.
+    try:
+        logger.warning("HAE_v2 payload shape: %s", payload_shape(raw.get("data") or {}))
+    except Exception:
+        pass
+
     data_block = raw.get("data") if isinstance(raw, dict) else None
     if not isinstance(data_block, dict):
         raise HTTPException(status_code=400, detail="Expected {'data': {'metrics': [...]}}")
@@ -1011,10 +1042,17 @@ async def receive_apple_health_v2(
     workouts_raw = data_block.get("workouts") or []
     if not isinstance(workouts_raw, list):
         raise HTTPException(status_code=400, detail="'data.workouts' must be a list")
-    # ЭКГ — тоже отдельный тип экспорта и отдельный POST с data.ecg[].
-    ecg_raw = data_block.get("ecg") or []
-    if not isinstance(ecg_raw, list):
-        raise HTTPException(status_code=400, detail="'data.ecg' must be a list")
+    # ЭКГ — тоже отдельный тип экспорта и отдельный POST. Имя блока в разных
+    # версиях HAE пишут по-разному, а документация противоречива — принимаем
+    # все известные варианты, первый непустой.
+    ecg_raw = []
+    for ecg_key in ("ecg", "ecgs", "electrocardiograms", "electrocardiogram"):
+        candidate = data_block.get(ecg_key)
+        if isinstance(candidate, list) and candidate:
+            ecg_raw = candidate
+            break
+        if candidate is not None and not isinstance(candidate, list):
+            raise HTTPException(status_code=400, detail=f"'data.{ecg_key}' must be a list")
 
     daily = _hae_to_daily_payloads(metrics)
     if not daily and not workouts_raw and not ecg_raw:
