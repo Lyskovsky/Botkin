@@ -1025,7 +1025,9 @@ _HR_EVENT_KEYS = (
 
 def _hae_hr_event_type(rec: dict) -> str | None:
     """Тип события: high/low/irregular или локализованная строка. Не нормализуем."""
-    raw = _hae_pick(rec, "type", "notificationType", "classification", "name")
+    # heartNotification — фактическое имя в живом пакете (проверено 31.08 через
+    # payload_shape: keys = [end, heartNotification, heartRateData, source, start, threshold]).
+    raw = _hae_pick(rec, "heartNotification", "type", "notificationType", "classification", "name")
     if raw is None:
         return None
     text = str(raw).strip()
@@ -1072,6 +1074,17 @@ def _hae_hr_events_to_rows(events: list[dict], user_id: int) -> list[dict]:
             val = _hae_quantity(_hae_pick(rec, *keys))
             return round(val) if val else None
 
+        # Пульс события приходит массивом heartRateData (в живом пакете отдельных
+        # полей min/max нет вовсе). Внутри — либо {qty}, либо {Min, Max, Avg}.
+        samples: list[float] = []
+        for point in rec.get("heartRateData") or []:
+            if not isinstance(point, dict):
+                continue
+            for field in ("qty", "Avg", "avg", "Min", "min", "Max", "max"):
+                val = _hae_quantity(point.get(field))
+                if val:
+                    samples.append(val)
+
         device_raw = _hae_pick(rec, "device", "sourceName", "source")
         rows.append(
             {
@@ -1080,9 +1093,10 @@ def _hae_hr_events_to_rows(events: list[dict], user_id: int) -> list[dict]:
                 "ended_at": end_dt,
                 "event_type": _hae_hr_event_type(rec),
                 "threshold_bpm": _bpm("threshold", "thresholdHeartRate", "heartRateThreshold"),
-                "min_bpm": _bpm("minHeartRate", "heartRateMin", "min"),
-                "max_bpm": _bpm("maxHeartRate", "heartRateMax", "max"),
-                "avg_bpm": _bpm("averageHeartRate", "avgHeartRate", "heartRate", "avg"),
+                "min_bpm": _bpm("minHeartRate", "heartRateMin", "min") or (round(min(samples)) if samples else None),
+                "max_bpm": _bpm("maxHeartRate", "heartRateMax", "max") or (round(max(samples)) if samples else None),
+                "avg_bpm": _bpm("averageHeartRate", "avgHeartRate", "heartRate", "avg")
+                or (round(sum(samples) / len(samples)) if samples else None),
                 "duration_min": round(duration_min) if duration_min is not None else None,
                 "device": str(device_raw)[:64] if device_raw else None,
                 "source": f"hae_hrn_{start_dt.isoformat()}"[:120],
