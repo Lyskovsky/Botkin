@@ -944,6 +944,11 @@ def _hae_ecg_to_rows(ecg: list[dict], user_id: int) -> list[dict]:
         if samples is None and isinstance(rec.get("voltageMeasurements"), list):
             samples = len(rec["voltageMeasurements"])
 
+        # Поля device в пакете нет — HAE кладёт имя устройства в source
+        # (проверено живым запросом 31.08: ecg[0].keys было без device).
+        device_raw = _hae_pick(rec, "device", "sourceName", "source")
+        device = str(device_raw)[:64] if device_raw else None
+
         ecg_id = rec.get("id")
         source = f"hae_ecg_{ecg_id}" if ecg_id else f"hae_ecg_{start_dt.isoformat()}"
 
@@ -952,12 +957,14 @@ def _hae_ecg_to_rows(ecg: list[dict], user_id: int) -> list[dict]:
                 "user_id": user_id,
                 "recorded_at": start_dt,
                 "classification": _hae_ecg_classification(rec),
-                "average_heart_rate": round(avg_hr) if avg_hr is not None else None,
+                # 0 уд/мин физически не бывает: так HAE помечает запись без пульса
+                # (например «Неоднозначная плохая запись»). Пишем NULL.
+                "average_heart_rate": round(avg_hr) if avg_hr else None,
                 "duration_sec": round(duration_sec) if duration_sec is not None else None,
                 "sampling_hz": round(sampling, 1) if sampling is not None else None,
                 "voltage_samples": round(samples) if samples is not None else None,
                 "symptoms": _hae_ecg_symptoms(rec),
-                "device": (str(_hae_pick(rec, "device", "sourceName") or "") or None),
+                "device": device,
                 "source": source[:120],
             }
         )
@@ -974,18 +981,11 @@ def _insert_new_ecg(db, user_id: int, rows: list[dict]) -> int:
         return 0
     from sqlalchemy import text as _text
 
-    sources = [r["source"] for r in rows]
-    existing = {
-        row[0]
-        for row in db.execute(
-            _text("SELECT source FROM ecg_records WHERE user_id = :uid AND source = ANY(:srcs)"),
-            {"uid": user_id, "srcs": sources},
-        )
-    }
-    inserted = 0
+    # UPSERT, а не «пропустить известное»: HAE присылает последние записи повторно,
+    # и если мы научились разбирать поле лучше (как с device и нулевым пульсом),
+    # исправление должно доехать до уже сохранённых строк, а не только до новых.
+    processed = 0
     for r in rows:
-        if r["source"] in existing:
-            continue
         db.execute(
             _text(
                 """INSERT INTO ecg_records
@@ -994,13 +994,19 @@ def _insert_new_ecg(db, user_id: int, rows: list[dict]) -> int:
                    VALUES (:user_id, :recorded_at, :classification, :average_heart_rate,
                            :duration_sec, :sampling_hz, :voltage_samples, :symptoms,
                            :device, :source)
-                   ON CONFLICT DO NOTHING"""
+                   ON CONFLICT (user_id, source) DO UPDATE SET
+                       classification = EXCLUDED.classification,
+                       average_heart_rate = EXCLUDED.average_heart_rate,
+                       duration_sec = EXCLUDED.duration_sec,
+                       sampling_hz = EXCLUDED.sampling_hz,
+                       voltage_samples = EXCLUDED.voltage_samples,
+                       symptoms = EXCLUDED.symptoms,
+                       device = EXCLUDED.device"""
             ),
             r,
         )
-        existing.add(r["source"])
-        inserted += 1
-    return inserted
+        processed += 1
+    return processed
 
 
 @app.post("/apple_health_v2")
