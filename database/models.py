@@ -788,6 +788,51 @@ class EcgRecord(Base):
     )
 
 
+class HeartRateEvent(Base):
+    """Уведомление Apple Watch о пульсе вне нормы в состоянии покоя.
+
+    Часы следят за пульсом в покое и присылают уведомление, если он держится
+    выше (или ниже) порога дольше 10 минут. Для нас это отдельный класс событий:
+    31.08.2026 три таких эпизода за одно утро остались только на экране телефона,
+    потому что канала для них не было — а ровно они и нужны, чтобы сопоставлять
+    тахикардию с гипогликемией (20.08 такой эпизод совпал со снижением до 3,10).
+
+    Тип события (`event_type`) не нормализуем: Apple присылает свои строки
+    (high/low/irregular и локализованные варианты), а терять новые хуже, чем
+    сохранить как есть.
+    """
+
+    __tablename__ = "heart_rate_events"
+
+    # BigInteger PK; на sqlite (тесты) рендерим как Integer — иначе не автоинкрементит.
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer(), "sqlite"), primary_key=True, autoincrement=True
+    )
+    user_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("users.telegram_id", ondelete="CASCADE"), nullable=False
+    )
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    ended_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    event_type: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    # Порог, который часы сравнивают с пульсом покоя (по умолчанию 100/40).
+    threshold_bpm: Mapped[Optional[int]] = mapped_column(SmallInteger, nullable=True)
+    min_bpm: Mapped[Optional[int]] = mapped_column(SmallInteger, nullable=True)
+    max_bpm: Mapped[Optional[int]] = mapped_column(SmallInteger, nullable=True)
+    avg_bpm: Mapped[Optional[int]] = mapped_column(SmallInteger, nullable=True)
+    duration_min: Mapped[Optional[int]] = mapped_column(SmallInteger, nullable=True)
+    device: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    # Ключ дедупа: HAE присылает последние события повторно при каждом экспорте.
+    source: Mapped[str] = mapped_column(String(120), nullable=False)
+    created_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=True
+    )
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "source", name="heart_rate_events_user_source_key"),
+        Index("idx_hr_events_user_started", "user_id", "started_at"),
+    )
+
+
 class GlucoseReading(Base):
     """Точки глюкозы CGM (Abbott FreeStyle Libre 3 → LibreLinkUp API, #96)."""
 
