@@ -150,3 +150,46 @@ def test_several_records_parsed():
     rows = _hae_ecg_to_rows([FULL, second], USER)
     assert len(rows) == 2
     assert rows[0]["source"] != rows[1]["source"]
+
+
+# ── диагностика формы пакета ──────────────────────────────────────────────────
+
+
+def test_payload_shape_lists_blocks_and_field_names():
+    from webhook.apple_health import payload_shape
+
+    shape = payload_shape({"metrics": [{"name": "step_count", "data": []}], "ecg": [FULL]})
+
+    assert shape["metrics"] == "list[1]"
+    assert shape["ecg"] == "list[1]"
+    assert "classification" in shape["ecg[0].keys"]
+    # metrics не разворачиваем — их имена логируются отдельной строкой
+    assert "metrics[0].keys" not in shape
+
+
+def test_payload_shape_does_not_leak_values():
+    """В логи идут только имена ключей: значения — медданные."""
+    from webhook.apple_health import payload_shape
+
+    text = str(payload_shape({"ecg": [FULL]}))
+
+    assert "Sinus Rhythm" not in text
+    assert "15360" not in text
+    assert "Apple Watch" not in text
+
+
+def test_payload_shape_handles_odd_types():
+    from webhook.apple_health import payload_shape
+
+    shape = payload_shape({"ecg": ["строка"], "meta": {"a": 1}, "n": 5, "none": None})
+
+    assert shape["ecg"] == "list[1]" and "ecg[0].keys" not in shape
+    assert shape["meta"] == "dict(1)"
+    assert shape["n"] == "int"
+    assert shape["none"] == "NoneType"
+
+
+def test_payload_shape_empty():
+    from webhook.apple_health import payload_shape
+
+    assert payload_shape({}) == {}
