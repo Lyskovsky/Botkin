@@ -92,6 +92,28 @@ def _save_mapping(patient_id: str, telegram_id: int) -> bool:
         db.close()
 
 
+def _mapping_owner(patient_id: str) -> int | None:
+    """Кому принадлежит уже существующая привязка patient_id (None — никому).
+
+    Нужен, чтобы отличить «этот сенсор уже подключён к ТВОЕМУ профилю» от
+    «занят другим». Без этого пользователь, у которого привязка уже есть,
+    получал пугающее «привязан к другому профилю» — так и вышло на первом
+    живом прогоне 21.08.2026, когда patient_id был привязан вручную заранее.
+    """
+    from database import SessionLocal
+    from database.models import CgmConnection
+
+    db = SessionLocal()
+    try:
+        row = db.query(CgmConnection.telegram_id).filter(CgmConnection.patient_id == patient_id).first()
+        return row[0] if row else None
+    except Exception as e:
+        logger.warning("connect_cgm: не смог определить владельца привязки %s: %s", patient_id, e)
+        return None
+    finally:
+        db.close()
+
+
 async def _connect_flow(message: Message, telegram_id: int) -> None:
     """Фоновая задача: ждём новый patient_id и привязываем его к пользователю."""
     async with _connect_lock:
@@ -499,8 +521,17 @@ async def on_bind(callback: CallbackQuery, callback_data: CgmBindCallback) -> No
             "✅ CGM подключён! Глюкоза начнёт поступать после ближайшего синка "
             "(и после прогрева сенсора, если он новый — около часа)."
         )
+        await callback.answer()
+        return
+
+    # unique(patient_id) не дал записать — выясняем, чей он: свой или чужой.
+    owner = await asyncio.to_thread(_mapping_owner, callback_data.patient_id)
+    if owner == callback.from_user.id:
+        await callback.message.answer(
+            "✅ Этот сенсор уже подключён к твоему профилю — ничего менять не нужно.\n"
+            "Креды follower-аккаунта я сохранил, дальше данные идут автоматически."
+        )
     else:
-        # unique(patient_id): этот сенсор уже привязан к кому-то другому.
         await callback.message.answer(
             "Этот сенсор уже привязан к другому профилю. Если это ошибка — напиши, разберёмся вручную."
         )

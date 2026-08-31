@@ -1,7 +1,7 @@
 """add ecg_records (ЭКГ с Apple Watch, метаданные)
 
 Revision ID: ecg01
-Revises: cgmfol0self01
+Revises: dropenc01
 Create Date: 2026-08-31
 
 Канала для ЭКГ в проекте не было вовсе: Health Auto Export умеет отдавать тип
@@ -23,7 +23,7 @@ import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
 revision: str = "ecg01"
-down_revision: Union[str, None] = "cgmfol0self01"
+down_revision: Union[str, None] = "dropenc01"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

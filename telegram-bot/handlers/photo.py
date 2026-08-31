@@ -1231,7 +1231,7 @@ async def handle_description(
                 for ph_path in photo_paths:
                     archived_names.append(
                         archive_photo_as_document(
-                            int(user_id), ph_path, reason="не распознано как еда/вес/добавки/АД/замеры"
+                            int(user_id), Path(ph_path), reason="не распознано как еда/вес/добавки/АД/замеры"
                         )
                     )
             except Exception:

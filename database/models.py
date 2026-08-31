@@ -122,8 +122,6 @@ class User(Base):
     # Генерируется автоматически на INSERT, чтобы новые юзеры всегда могли
     # запустить разговорного агента. Бэкфилл существующих: scripts/backfill_jwt_secret.py.
     jwt_secret: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, default=lambda: secrets.token_hex(32))
-    encrypted_openai_key: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    encrypted_anthropic_key: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     # Per-user system prompt для BotkinClaw (in-process AI-агента) — см. ADR-0002.
     # Source of truth для тона/контекста. Меняется SQL'ом в users.agent_system_prompt.
     agent_system_prompt: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
