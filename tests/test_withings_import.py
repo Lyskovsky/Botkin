@@ -57,7 +57,7 @@ def test_parse_measure_groups_maps_all_fields():
     assert row["water"] == 44.2  # 48.36 кг воды при весе 109.532 → % (см. test_water_converted_kg_to_percent)
     assert row["bone_mass"] == 3.6
     assert row["visceral_fat"] == 6.2
-    assert row["bmr"] == 2172
+    assert row["bmr_kcal"] == 2172
     assert row["measured_at"].tzinfo is timezone.utc  # tz-aware → корректно в timestamptz
 
 
@@ -406,3 +406,63 @@ def test_fetch_measure_groups_raises_on_status(monkeypatch):
     monkeypatch.setattr(wt, "requests", types.SimpleNamespace(post=lambda *a, **k: _Resp()))
     with pytest.raises(wt.WithingsError):
         wt.fetch_measure_groups("ACC", 0, 100)
+
+
+# ── пульс с весов (найдено 31.08: терялся вместе с группой без веса) ──────────
+
+
+def _grp_pairs(ts: int, measures: list[tuple[int, float]]) -> dict:
+    """Группа Withings из пар (тип, значение): значение → мантисса с unit=-3.
+
+    Отличается от _grp выше: там measures передаются уже готовыми словарями.
+    """
+    return {"date": ts, "measures": [{"type": t, "value": int(v * 1000), "unit": -3} for t, v in measures]}
+
+
+def test_pulse_from_separate_group_attached_to_weighing():
+    """Весы пишут пульс ОТДЕЛЬНОЙ группой без веса — раньше он отбрасывался."""
+    groups = [
+        _grp_pairs(1756400000, [(1, 105.2), (6, 32.3)]),
+        _grp_pairs(1756400030, [(11, 127)]),  # через 30 секунд — то же взвешивание
+    ]
+    rows = wt.parse_measure_groups(groups)
+
+    assert len(rows) == 1
+    assert rows[0]["heart_rate"] == 127
+
+
+def test_pulse_outside_window_not_attached():
+    groups = [
+        _grp_pairs(1756400000, [(1, 105.2)]),
+        _grp_pairs(1756400600, [(11, 127)]),  # +10 минут — другое событие
+    ]
+    assert wt.parse_measure_groups(groups)[0].get("heart_rate") is None
+
+
+def test_pulse_in_same_group_kept():
+    rows = wt.parse_measure_groups([_grp_pairs(1756400000, [(1, 105.2), (11, 96)])])
+    assert rows[0]["heart_rate"] == 96
+
+
+def test_two_weighings_get_their_own_pulses():
+    groups = [
+        _grp_pairs(1756400000, [(1, 105.2)]),
+        _grp_pairs(1756400020, [(11, 127)]),
+        _grp_pairs(1756486400, [(1, 105.6)]),
+        _grp_pairs(1756486420, [(11, 98)]),
+    ]
+    assert [r["heart_rate"] for r in wt.parse_measure_groups(groups)] == [127, 98]
+
+
+def test_pulse_only_groups_do_not_create_rows():
+    assert wt.parse_measure_groups([_grp_pairs(1756400000, [(11, 127)])]) == []
+
+
+def test_bmr_and_masses_parsed_and_rounded():
+    rows = wt.parse_measure_groups([_grp_pairs(1756400000, [(1, 105.2), (5, 71.19), (8, 34.01), (226, 2104)])])
+    m = wt.to_api_measurement(rows[0])
+
+    assert m["lean_mass_kg"] == 71.19
+    assert m["fat_mass_kg"] == 34.01
+    assert m["bmr_kcal"] == 2104  # целое: колонка SmallInteger
+    assert isinstance(m["bmr_kcal"], int)
