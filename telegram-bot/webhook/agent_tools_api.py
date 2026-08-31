@@ -206,6 +206,11 @@ class BodyCompositionMeasurement(BaseModel):
     bone_mass: Optional[float] = Field(None, ge=0, le=50, description="Костная масса, кг")
     visceral_fat: Optional[float] = Field(None, ge=0, le=60, description="Висцеральный жир (индекс)")
     bmi: Optional[float] = Field(None, gt=5, le=100, description="ИМТ")
+    # Весы Withings мерят пульс при взвешивании (стоя, натощак — по сути пульс покоя).
+    heart_rate: Optional[int] = Field(None, ge=20, le=250, description="Пульс при взвешивании, уд/мин")
+    bmr_kcal: Optional[int] = Field(None, ge=500, le=6000, description="Основной обмен по составу тела, ккал")
+    fat_mass_kg: Optional[float] = Field(None, ge=0, le=200, description="Жировая масса, кг")
+    lean_mass_kg: Optional[float] = Field(None, ge=0, le=200, description="Безжировая масса, кг")
 
 
 class LogBodyCompositionRequest(BaseModel):
@@ -816,6 +821,10 @@ async def log_body_composition(
             # Колонка visceral_fat — INTEGER, весы отдают float
             visceral_fat=round(m.visceral_fat) if m.visceral_fat is not None else None,
             bone_mass=m.bone_mass,
+            heart_rate=m.heart_rate,
+            bmr_kcal=m.bmr_kcal,
+            fat_mass_kg=m.fat_mass_kg,
+            lean_mass_kg=m.lean_mass_kg,
             source=req.source,
         )
         if created:
