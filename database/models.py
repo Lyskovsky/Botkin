@@ -745,6 +745,49 @@ class CgmFollower(Base):
     )
 
 
+class EcgRecord(Base):
+    """Запись ЭКГ с Apple Watch (метаданные, без сырого сигнала).
+
+    Apple отдаёт ЭКГ двумя частями: метаданные (время, длительность, средний
+    пульс и классификация ритма) и ~15 000 точек вольтажа на 30-секундную
+    запись. В базу пишем только метаданные: сырой сигнал бесполезен без
+    визуализации, а для врача его выгружают из «Здоровья» в PDF.
+
+    classification — как её называет Apple: sinusRhythm, atrialFibrillation,
+    highHeartRate, lowHeartRate, inconclusive и др. Строку не нормализуем:
+    список значений расширяется с версиями watchOS, а терять новые нельзя.
+    """
+
+    __tablename__ = "ecg_records"
+
+    # BigInteger PK; на sqlite (тесты) рендерим как Integer — иначе не автоинкрементит.
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer(), "sqlite"), primary_key=True, autoincrement=True
+    )
+    user_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("users.telegram_id", ondelete="CASCADE"), nullable=False
+    )
+    recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    classification: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    average_heart_rate: Mapped[Optional[int]] = mapped_column(SmallInteger, nullable=True)
+    duration_sec: Mapped[Optional[int]] = mapped_column(SmallInteger, nullable=True)
+    sampling_hz: Mapped[Optional[float]] = mapped_column(Numeric(precision=6, scale=1), nullable=True)
+    # Сколько точек вольтажа было в записи — признак полноты (30 с × 512 Гц ≈ 15 360).
+    voltage_samples: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    symptoms: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    device: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    # Ключ дедупа: HAE может присылать одну и ту же запись повторно.
+    source: Mapped[str] = mapped_column(String(120), nullable=False)
+    created_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=True
+    )
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "source", name="ecg_records_user_source_key"),
+        Index("idx_ecg_user_recorded", "user_id", "recorded_at"),
+    )
+
+
 class GlucoseReading(Base):
     """Точки глюкозы CGM (Abbott FreeStyle Libre 3 → LibreLinkUp API, #96)."""
 
