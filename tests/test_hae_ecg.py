@@ -193,3 +193,34 @@ def test_payload_shape_empty():
     from webhook.apple_health import payload_shape
 
     assert payload_shape({}) == {}
+
+
+# ── мелочи, найденные на живых данных 31.08 ───────────────────────────────────
+
+
+def test_zero_average_heart_rate_becomes_none():
+    """0 уд/мин не бывает — так HAE помечает запись без пульса («плохая запись»)."""
+    rec = {"start": "2026-08-31 17:34:00 +0300", "classification": "Неоднозначная плохая запись", "averageHeartRate": 0}
+    assert _hae_ecg_to_rows([rec], USER)[0]["average_heart_rate"] is None
+
+
+def test_device_taken_from_hae_source_field():
+    """В живом пакете поля device нет — имя устройства лежит в source."""
+    rec = {"start": "2026-08-31 17:35:00 +0300", "source": "Apple Watch Андрея"}
+    assert _hae_ecg_to_rows([rec], USER)[0]["device"] == "Apple Watch Андрея"
+
+
+def test_explicit_device_wins_over_source():
+    rec = {"start": "2026-08-31 17:35:00 +0300", "device": "Watch S9", "source": "iPhone"}
+    assert _hae_ecg_to_rows([rec], USER)[0]["device"] == "Watch S9"
+
+
+def test_long_device_truncated_to_column_width():
+    rec = {"start": "2026-08-31 17:35:00 +0300", "source": "д" * 200}
+    assert len(_hae_ecg_to_rows([rec], USER)[0]["device"]) == 64
+
+
+def test_russian_classification_kept():
+    """HAE локализует заключение — «Синусовый ритм» должен сохраниться как есть."""
+    rec = {"start": "2026-08-31 17:35:00 +0300", "classification": "Синусовый ритм"}
+    assert _hae_ecg_to_rows([rec], USER)[0]["classification"] == "Синусовый ритм"
