@@ -100,7 +100,7 @@ def verify_token(authorization: Optional[str] = Header(None), token: Optional[st
     # Accept either the global APPLE_HEALTH_TOKEN (backward compat / single-user)
     # OR any per-user token stored in users.health_token (multi-user).
     # Actual user resolution happens in the endpoint after DB lookup.
-    if APPLE_HEALTH_TOKEN and resolved == APPLE_HEALTH_TOKEN:
+    if APPLE_HEALTH_TOKEN and hmac.compare_digest(resolved, APPLE_HEALTH_TOKEN):
         return resolved  # global token — will resolve to _target_user_id
     # Per-user tokens are validated inside the endpoint against the DB.
     return resolved
@@ -289,7 +289,7 @@ async def receive_apple_health(
         )
 
         # ── Resolve user ──────────────────────────────────────────────────────
-        if APPLE_HEALTH_TOKEN and bearer_token == APPLE_HEALTH_TOKEN:
+        if APPLE_HEALTH_TOKEN and hmac.compare_digest(bearer_token, APPLE_HEALTH_TOKEN):
             target_user_id = _target_user_id
         else:
             # Per-user token: look up in DB
@@ -1232,7 +1232,7 @@ async def receive_apple_health_v2(
     from database.crud import create_or_update_activity, get_user_by_health_token, get_activity_by_date
     from sqlalchemy import text as _text
 
-    if APPLE_HEALTH_TOKEN and bearer_token == APPLE_HEALTH_TOKEN:
+    if APPLE_HEALTH_TOKEN and hmac.compare_digest(bearer_token, APPLE_HEALTH_TOKEN):
         target_user_id = _target_user_id
     else:
         _db_auth = SessionLocal()
