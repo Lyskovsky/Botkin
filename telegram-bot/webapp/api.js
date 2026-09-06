@@ -65,6 +65,14 @@
       );
     },
 
+    // PATCH /api/meal  {meal_id, status}
+    patchMealStatus(meal_id, status) {
+      return request('/api/meal', {
+        method: 'PATCH',
+        body: JSON.stringify({ meal_id, status }),
+      });
+    },
+
     // GET /api/favorites?limit=N
     getFavorites(limit = 15) {
       return request(`/api/favorites?limit=${limit}`);

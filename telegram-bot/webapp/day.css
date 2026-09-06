@@ -150,6 +150,10 @@
 .add-in-slot { color: var(--accent); font-size: 14px; padding: 10px 0 2px;
                cursor: pointer; text-align: center; }
 
+.badge-plan{font-size:11px;padding:1px 6px;border-radius:8px;background:#fff3cd;color:#8a6d00;margin-left:6px;vertical-align:middle}
+.item-plan .item-name{color:#8a6d00}
+.plan-close{margin:6px 12px;padding:8px;text-align:center;border:1px dashed #c9a400;border-radius:8px;color:#8a6d00;cursor:pointer;font-size:14px}
+
 /* ── Progress footer ── */
 .day-footer {
   position: sticky; bottom: 50px;
