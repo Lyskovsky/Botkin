@@ -233,7 +233,7 @@ async def public_stats():
                 db.execute(
                     sql_text(
                         "SELECT COALESCE(SUM(cost_usd),0) FROM llm_usage_log "
-                        "WHERE created_at >= date_trunc('month', NOW())"
+                        "WHERE created_at >= NOW() - interval '30 days'"
                     )
                 ).scalar()
                 or 0
@@ -249,7 +249,7 @@ async def public_stats():
             "meals": meals,
             "active_users": users,
             "biomarker_types": biomarker_types,
-            "llm_cost_this_month_usd": round(float(llm_month), 2),
+            "llm_cost_30d_usd": round(float(llm_month), 2),
         },
         headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "public, max-age=300"},
     )

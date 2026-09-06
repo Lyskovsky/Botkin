@@ -851,7 +851,7 @@ flowchart LR
 
   <details class="faq-item">
     <summary>Это бесплатно?</summary>
-    <p>Сам сервис — да. Реальные затраты сейчас: сервер ~€5/мес (Hetzner CX22), LLM API <span id="cost-llm">~$2/мес</span> (<span id="active-users">9</span> активных юзеров). Дёшево потому что prompt caching экономит 90% input-токенов. Если пользователей станет намного больше и LLM-расходы вырастут — попросим юзеров подключить свой API-ключ от Anthropic/OpenAI (платишь сам напрямую провайдеру) или введём подписку. Сейчас open-source без коммерции (AGPL-3.0).</p>
+    <p>Сам сервис — да. Реальные затраты сейчас: сервер ~€5/мес (Hetzner CX22), LLM API <span id="cost-llm">~$2</span> за последние 30 дней (<span id="active-users">9</span> активных юзеров). Дёшево потому что prompt caching экономит 90% input-токенов. Если пользователей станет намного больше и LLM-расходы вырастут — попросим юзеров подключить свой API-ключ от Anthropic/OpenAI (платишь сам напрямую провайдеру) или введём подписку. Сейчас open-source без коммерции (AGPL-3.0).</p>
   </details>
 
   <details class="faq-item">
@@ -952,9 +952,9 @@ fetch('https://botkin.health/api/public_stats')  // #387: nginx botkin.health т
       const el = document.getElementById('bio-counter');
       if (el) el.textContent = data.biomarker_types + '+';
     }
-    if (typeof data.llm_cost_this_month_usd === 'number') {
+    if (typeof data.llm_cost_30d_usd === 'number') {
       const el = document.getElementById('cost-llm');
-      if (el) el.textContent = '~$' + data.llm_cost_this_month_usd.toFixed(2) + '/мес';
+      if (el) el.textContent = '~$' + data.llm_cost_30d_usd.toFixed(2);
     }
     if (typeof data.active_users === 'number') {
       const el = document.getElementById('active-users');
