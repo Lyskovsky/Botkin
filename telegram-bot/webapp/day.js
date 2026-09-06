@@ -199,11 +199,13 @@
       const allItems = meals.flatMap(m => m.items);
       const previewText = allItems.map(it => it.name).join(' · ');
       const itemsHtml = isExpanded ? renderMergedItems(slot, meals) : '';
+      const hasPlan = meals.some(m => m.status === 'plan');
+      const planBadge = hasPlan ? '<span class="badge-plan">📋 план</span>' : '';
       return `
         <div class="slot ${isExpanded ? 'expanded' : ''}" data-slot="${slot}">
           <div class="slot-header-row" data-toggle="slot:${slot}" style="display:flex;justify-content:space-between;align-items:flex-start;cursor:pointer;width:100%">
             <div class="slot-left" style="flex:1;min-width:0;">
-              <div class="slot-title">${SLOT_LABEL[slot]}</div>
+              <div class="slot-title">${SLOT_LABEL[slot]}${planBadge}</div>
               ${!isExpanded ? `<div class="slot-preview">${escapeHtml(previewText)}</div>` : ''}
             </div>
             <div class="slot-right" style="flex-shrink:0;padding-left:8px;text-align:right;">
@@ -227,6 +229,19 @@
         openAddSheet(el.dataset.slot);
       });
     });
+    container.querySelectorAll('.plan-close').forEach(el => {
+      el.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const mealId = Number(el.dataset.mealId);
+        try {
+          await API.patchMealStatus(mealId, 'eaten');
+          tg?.HapticFeedback?.notificationOccurred?.('success');
+          await loadDay();
+        } catch (err) {
+          tg?.showAlert?.(`Ошибка: ${err.message}`) ?? alert(err.message);
+        }
+      });
+    });
     // Swipe + tap: wired in Task 13.
     window.__wireItemGestures?.(container);
   }
@@ -239,8 +254,9 @@
     const itemsHtml = rows.map(({ meal, it }) => {
       const noMacros = it.kcal === 0 && it.p === 0 && it.f === 0 && it.c === 0;
       const warn = noMacros ? '<span class="item-warn">❗</span> ' : '';
+      const planCls = meal.status === 'plan' ? ' item-plan' : '';
       return `
-      <div class="item" data-meal-id="${meal.id}" data-idx="${it.idx}">
+      <div class="item${planCls}" data-meal-id="${meal.id}" data-idx="${it.idx}">
         <div class="delete-bg">Удалить</div>
         <div class="item-row">
           <div class="item-name">${warn}${escapeHtml(it.name)}</div>
@@ -249,9 +265,13 @@
         </div>
       </div>`;
     }).join('');
+    const planMeals = meals.filter(m => m.status === 'plan');
+    const planCloseHtml = planMeals.map(m => `
+      <div class="plan-close" data-meal-id="${m.id}">✓ Съедено целиком — закрыть план</div>`).join('');
     return `
     <div class="items">
       ${itemsHtml}
+      ${planCloseHtml}
       <div class="add-in-slot" data-slot="${slot}">+ добавить в ${SLOT_LABEL[slot].replace(/^\S+\s/, '').toLowerCase()}</div>
     </div>`;
   }

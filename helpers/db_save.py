@@ -210,6 +210,7 @@ def save_meal_to_db(meal_data: dict, meal_name: str = None, user_id: int = None)
                 items=items,
                 totals=totals,
                 photo_paths=photo_paths,
+                status="plan" if meal_data.get("is_plan") else "eaten",
             )
             logger.info(f"Meal saved to DB: {meal_name} on {meal_date} at {meal_time}")
             return log.id

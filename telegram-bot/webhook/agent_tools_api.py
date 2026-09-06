@@ -9,6 +9,7 @@ Tasks 5-7 of HealthVault Sprint 1a:
   - Task 7: Read endpoints (recent_meals, kb_value, dashboard_summary, user_profile)
 """
 
+import math
 import re
 import sys
 import asyncio
@@ -16,11 +17,11 @@ import secrets
 import logging
 from datetime import datetime, date, timedelta, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, List, Optional
 
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
 # Ensure project root on path for database imports
@@ -148,6 +149,7 @@ class LogMealTextRequest(BaseModel):
     text: str
     date: Optional[str] = None  # YYYY-MM-DD; defaults to today
     slot: Optional[str] = None  # breakfast | lunch | dinner | snack; auto-detected if None
+    as_plan: bool = False  # #407 план→факт: True — записать со status='plan' (еда внесена авансом)
 
 
 class LogSupplementRequest(BaseModel):
@@ -249,6 +251,30 @@ class EditMealRequest(BaseModel):
 
 class DeleteMealRequest(BaseModel):
     meal_id: int
+
+
+class AdjustChange(BaseModel):
+    idx: int
+    new_weight: Optional[float] = None
+    remove: bool = False
+
+    @field_validator("new_weight")
+    @classmethod
+    def _weight_finite_non_negative(cls, v: Optional[float]) -> Optional[float]:
+        if v is None:
+            return v
+        if not math.isfinite(v) or v < 0:
+            raise ValueError("new_weight must be a finite number >= 0")
+        return v
+
+
+class AdjustMealItemsRequest(BaseModel):
+    meal_id: int
+    changes: List[AdjustChange] = []
+    leftover_to_slot: Optional[str] = None  # breakfast/lunch/dinner/snack → остаток новой записью-планом
+    leftover_to_date: Optional[str] = None  # YYYY-MM-DD, по умолчанию сегодня
+    close_plan: bool = False
+    dry_run: bool = True  # безопасный дефолт: без явного dry_run=false ничего не меняем
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -398,6 +424,7 @@ async def log_meal_text(
     if totals.get("fiber") is None:
         totals["fiber"] = 0
 
+    log_status = "plan" if req.as_plan else "eaten"
     log = create_nutrition_log(
         db=db,
         user_id=user.telegram_id,
@@ -406,6 +433,7 @@ async def log_meal_text(
         meal_name=meal_name,
         items=items,
         totals=totals,
+        status=log_status,
     )
 
     return {
@@ -416,6 +444,7 @@ async def log_meal_text(
         "meal_name": meal_name,
         "items_count": len(items),
         "totals": totals,
+        "meal": {"id": log.id, "status": log_status},
     }
 
 
@@ -472,6 +501,46 @@ async def delete_meal(
     if not ok:
         raise HTTPException(status_code=404, detail=f"meal {req.meal_id} not found")
     return {"status": "ok", "deleted_meal_id": req.meal_id}
+
+
+@router.post("/adjust_meal_items")
+async def adjust_meal_items_ep(
+    req: AdjustMealItemsRequest,
+    user=Depends(require_agent_scope("rw")),
+    db: Session = Depends(get_db),
+):
+    """#407 план→факт: изменить вес/убрать items внутри записи, вынести остаток планом, закрыть план.
+    dry_run=true — только посчитать (превью перед подтверждением)."""
+    from database.crud import adjust_meal_items
+
+    if not req.changes and not req.close_plan:
+        raise HTTPException(status_code=400, detail="changes is empty and close_plan=false — nothing to do")
+
+    leftover_to = None
+    if req.leftover_to_slot:
+        mt, default_name = _slot_to_meal_time(req.leftover_to_slot)  # raises 400 on unknown slot
+        leftover_to = {
+            "date": _parse_date(req.leftover_to_date, user),
+            "meal_time": mt,
+            "meal_name": f"{default_name} (план)",
+        }
+
+    try:
+        res = adjust_meal_items(
+            db,
+            meal_id=req.meal_id,
+            user_id=user.telegram_id,
+            changes=[c.model_dump() for c in req.changes],
+            leftover_to=leftover_to,
+            close_plan=req.close_plan,
+            dry_run=req.dry_run,
+        )
+    except (IndexError, ValueError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except LookupError:
+        raise HTTPException(status_code=404, detail=f"meal {req.meal_id} not found")
+
+    return {"status": "ok", "dry_run": req.dry_run, **res}
 
 
 @router.post("/log_supplement")
@@ -881,6 +950,7 @@ async def regenerate_health_token(
 async def recent_meals(
     days: int = 7,
     compact: bool = False,
+    only_open_plans: bool = False,
     user=Depends(get_agent_user),
     db: Session = Depends(get_db),
 ):
@@ -891,6 +961,9 @@ async def recent_meals(
     сводится к калориям. Режет payload в ~5-10 раз (один такой запрос на 90 дней
     раньше стоил ~120k токенов / $2). Авто-включается при days > 14, чтобы один
     вызов не раздувал контекст.
+
+    only_open_plans=True — #407 план→факт: только записи со status='plan' за
+    сегодня (открытые планы, ещё не сведённые к факту).
     """
     from database.crud import get_nutrition_logs_by_period
 
@@ -905,6 +978,8 @@ async def recent_meals(
     start_date = end_date - timedelta(days=days - 1)
 
     logs = get_nutrition_logs_by_period(db, user.telegram_id, start_date, end_date)
+    if only_open_plans:
+        logs = [log for log in logs if log.status == "plan" and log.date == end_date]
 
     result = []
     for log in logs:
@@ -927,6 +1002,7 @@ async def recent_meals(
                 "meal_name": log.meal_name,
                 "items": items_out,
                 "totals": totals_out,
+                "status": log.status,
             }
         )
 

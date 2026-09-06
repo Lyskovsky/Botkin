@@ -119,6 +119,7 @@ class MealStateData(BaseModel):
     product_label: Optional[Dict[str, Any]] = Field(
         None, description="Этикетка упакованного продукта (#255) → предложение «Запомнить продукт»"
     )
+    is_plan: Optional[bool] = Field(None, description="#407: запись-план, сохраняется со status='plan'")
 
     @model_validator(mode="after")
     def _require_meal_or_multi_meals(self) -> "MealStateData":
