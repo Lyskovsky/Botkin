@@ -165,6 +165,7 @@ class NutritionLog(Base):
             "user_id", "date", "meal_time", "meal_name", name="nutrition_log_user_id_date_meal_time_meal_name_key"
         ),
         Index("idx_nutrition_user_date", "user_id", "date"),
+        Index("idx_nutrition_user_date_status", "user_id", "date", "status"),  # #407: планы за день
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
