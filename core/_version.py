@@ -4,4 +4,4 @@ Bump via `python scripts/bump_version.py X.Y.Z` — он также правит
 SemVer: MAJOR.MINOR.PATCH. До v1.0.0 — pre-stable (API/схема может меняться).
 """
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
