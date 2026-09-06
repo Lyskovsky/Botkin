@@ -45,7 +45,7 @@ EXPECTED_TABLES = {
 }
 
 # Актуальный head миграций. Обновляется при каждой новой ревизии.
-HEAD_REVISION = "wtpulse01"
+HEAD_REVISION = "nlplan01"
 
 
 def _alembic_config() -> Config:

@@ -416,6 +416,7 @@ def create_nutrition_log(
     items: List[Dict],
     totals: Dict,
     photo_paths: Optional[List[str]] = None,
+    status: str = "eaten",
 ) -> NutritionLog:
     """Create a new nutrition log entry"""
     log = NutritionLog(
@@ -426,6 +427,7 @@ def create_nutrition_log(
         items=items,
         totals=totals,
         photo_paths=photo_paths or [],
+        status=status,
     )
     db.add(log)
     db.commit()

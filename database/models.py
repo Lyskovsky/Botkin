@@ -178,6 +178,9 @@ class NutritionLog(Base):
     items: Mapped[dict] = mapped_column(JSONBCompat, nullable=False)
     totals: Mapped[dict] = mapped_column(JSONBCompat, nullable=False)
     photo_paths: Mapped[Optional[List[str]]] = mapped_column(SafeArray, nullable=True)
+    # #407: 'eaten' (факт, по умолчанию) | 'plan' (внесено авансом, ждёт сведения к факту).
+    # План считается в итог дня как съеденное, но помечается 📋 везде, где показывается.
+    status: Mapped[str] = mapped_column(String(16), nullable=False, server_default="eaten", default="eaten")
     created_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=True
     )
