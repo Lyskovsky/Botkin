@@ -1235,6 +1235,188 @@ def delete_nutrition_item(db: Session, meal_id: int, user_id: int, idx: int) -> 
     return removed, row.totals
 
 
+MEAL_STATUSES = ("eaten", "plan")
+
+
+def set_meal_status(db: Session, meal_id: int, user_id: int, status: str) -> NutritionLog:
+    """Set nutrition_log.status ('eaten'|'plan'), scoped by user."""
+    if status not in MEAL_STATUSES:
+        raise ValueError(f"unknown status {status!r}, expected one of {MEAL_STATUSES}")
+    row = get_nutrition_log(db, meal_id=meal_id, user_id=user_id)
+    if row is None:
+        raise LookupError(f"meal {meal_id} not found for user {user_id}")
+    row.status = status
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def get_open_plans(db: Session, user_id: int, for_date: date) -> List[NutritionLog]:
+    """Открытые планы (status='plan') пользователя на дату, по времени приёма пищи."""
+    return (
+        db.query(NutritionLog)
+        .filter(NutritionLog.user_id == user_id, NutritionLog.date == for_date, NutritionLog.status == "plan")
+        .order_by(NutritionLog.meal_time)
+        .all()
+    )
+
+
+def _scale_item(item: dict, new_weight: float) -> dict:
+    """Копия item с весом new_weight; макросы пропорционально исходному весу.
+
+    Вес канонизируется в amount/unit (легаси weight_g/weight отбрасываются),
+    как это делает update_nutrition_item_weight.
+    """
+    from core.food.fiber_table import _item_weight
+
+    old_w = _item_weight(item) or 0.0
+    factor = (new_weight / old_w) if old_w > 0 else 0.0
+    out = {k: v for k, v in item.items() if k not in ("weight_g", "weight", "amount", "unit")}
+    for k in ("calories", "protein", "fats", "carbs", "fiber"):
+        if item.get(k) is not None:
+            out[k] = round(float(item.get(k) or 0) * factor, 1)
+    out["amount"] = round(new_weight, 1)
+    out["unit"] = "г"
+    return out
+
+
+def _apply_meal_changes(items: List[dict], changes: List[dict]) -> tuple:
+    """Разложить items по списку changes на (kept, leftover, change_log).
+
+    changes: [{"idx", "new_weight"} | {"idx", "remove": True}]. new_weight<=0 ≡ remove.
+    new_weight клэмпится в [0, old_weight]. Остаток (leftover) — старый вес минус новый.
+    """
+    from core.food.fiber_table import _item_name, _item_weight
+
+    for ch in changes:
+        idx = ch["idx"]
+        if idx < 0 or idx >= len(items):
+            raise IndexError(f"idx {idx} out of range (have {len(items)} items)")
+    changes_by_idx = {ch["idx"]: ch for ch in changes}
+
+    kept: List[dict] = []
+    leftover: List[dict] = []
+    change_log: List[dict] = []
+    for idx, item in enumerate(items):
+        ch = changes_by_idx.get(idx)
+        if ch is None:
+            kept.append(dict(item))
+            continue
+        old_w = _item_weight(item)
+        new_w = 0.0 if ch.get("remove") else float(ch.get("new_weight", 0) or 0)
+        new_w = max(0.0, min(new_w, old_w))
+        leftover_w = old_w - new_w
+        if new_w > 0:
+            kept.append(_scale_item(item, new_w))
+        if leftover_w > 0:
+            leftover.append(_scale_item(item, leftover_w))
+        old_calories = float(item.get("calories") or 0)
+        change_log.append(
+            {
+                "idx": idx,
+                "name": _item_name(item),
+                "old_weight": old_w,
+                "new_weight": new_w,
+                "old_calories": old_calories,
+                "new_calories": round(old_calories * (new_w / old_w), 1) if old_w > 0 else 0.0,
+            }
+        )
+    return kept, leftover, change_log
+
+
+def _create_leftover_plan(db: Session, user_id: int, leftover_to: dict, leftover_items: List[dict]) -> NutritionLog:
+    leftover_totals = _recalc_totals(leftover_items)
+    leftover_row = NutritionLog(
+        user_id=user_id,
+        date=leftover_to["date"],
+        meal_time=leftover_to.get("meal_time"),
+        meal_name=leftover_to.get("meal_name"),
+        items=leftover_items,
+        totals=leftover_totals,
+        photo_paths=[],
+        status="plan",
+    )
+    db.add(leftover_row)
+    db.flush()
+    return leftover_row
+
+
+def adjust_meal_items(
+    db: Session,
+    meal_id: int,
+    user_id: int,
+    changes: List[dict],
+    leftover_to: Optional[dict] = None,
+    close_plan: bool = False,
+    dry_run: bool = False,
+) -> dict:
+    """Скорректировать/удалить items внутри одной записи (план → факт).
+
+    changes: [{"idx","new_weight"} | {"idx","remove":True}], может быть пустым только
+    если close_plan=True (тогда просто закрываем план, ничего не меняя).
+    leftover_to: None (остаток пропадает) | {"date","meal_time","meal_name"} — остаток
+    уходит в новую запись со status='plan'.
+    """
+    row = get_nutrition_log(db, meal_id=meal_id, user_id=user_id)
+    if row is None:
+        raise LookupError(f"meal {meal_id} not found for user {user_id}")
+    if not changes and not close_plan:
+        raise ValueError("changes пуст и close_plan=False — нечего делать")
+
+    items = list(row.items or [])
+    before_totals = dict(row.totals or {})
+
+    if changes:
+        kept_items, leftover_items, change_log = _apply_meal_changes(items, changes)
+    else:
+        kept_items, leftover_items, change_log = [dict(it) for it in items], [], []
+
+    after_totals = _recalc_totals(kept_items)
+    new_status = "eaten" if close_plan else row.status
+    deleted = not kept_items
+
+    result = {
+        "meal": {"id": row.id, "date": row.date, "meal_name": row.meal_name, "status": new_status},
+        "before_totals": before_totals,
+        "after_totals": after_totals,
+        "changes": change_log,
+        "leftover": None,
+        "deleted": deleted,
+    }
+
+    if leftover_to and leftover_items:
+        preview_totals = _recalc_totals(leftover_items)
+        result["leftover"] = {
+            "id": None,
+            "meal_name": leftover_to.get("meal_name"),
+            "totals": preview_totals,
+        }
+
+    if dry_run:
+        return result
+
+    from sqlalchemy.orm.attributes import flag_modified
+
+    if deleted:
+        db.delete(row)
+    else:
+        row.items = kept_items
+        row.totals = after_totals
+        row.status = new_status
+        flag_modified(row, "items")
+        flag_modified(row, "totals")
+
+    if leftover_to and leftover_items:
+        leftover_row = _create_leftover_plan(db, user_id, leftover_to, leftover_items)
+        result["leftover"] = {"id": leftover_row.id, "meal_name": leftover_row.meal_name}
+
+    db.commit()
+    if not deleted:
+        db.refresh(row)
+
+    return result
+
+
 def update_nutrition_meal_fields(
     db: Session,
     meal_id: int,
