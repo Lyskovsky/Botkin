@@ -10,6 +10,12 @@ from __future__ import annotations
 
 from typing import Optional
 
+# Пороги: calories item «похожи на значение на 100 г» (±5%) и при этом далеки
+# от per100 × вес / 100 (>15%) — тогда LLM забыл умножить на вес упаковки.
+_LABEL_MATCH_TOLERANCE = 0.05
+_LABEL_MISMATCH_THRESHOLD = 0.15
+_WEIGHT_IS_100G_TOLERANCE = 1.0
+
 _MACROS = (
     ("calories", "calories_per_100g"),
     ("protein", "protein_per_100g"),
@@ -28,11 +34,11 @@ def reconcile_items_with_label(items: list, product_label: Optional[dict]) -> li
     if not per100 or not w or not cal:
         return items
     w, per100, cal = float(w), float(per100), float(cal)
-    if abs(w - 100) < 1:
+    if abs(w - 100) < _WEIGHT_IS_100G_TOLERANCE:
         return items
     expected = per100 * w / 100
-    looks_like_per100 = abs(cal - per100) <= 0.05 * per100
-    far_from_expected = abs(cal - expected) > 0.15 * expected
+    looks_like_per100 = abs(cal - per100) <= _LABEL_MATCH_TOLERANCE * per100
+    far_from_expected = abs(cal - expected) > _LABEL_MISMATCH_THRESHOLD * expected
     if not (looks_like_per100 and far_from_expected):
         return items
     fixed = dict(it)

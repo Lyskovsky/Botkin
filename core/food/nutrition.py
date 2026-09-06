@@ -626,16 +626,35 @@ def process_meal_description(
 # (process_llm_food_data определена ниже в этом файле)
 
 
+# Стемминг для сопоставления веса из текста пользователя с именем item от LLM (#408):
+# русские падежи меняют окончание, поэтому сравниваем префиксы слов.
+# Известное ограничение: пары, у которых длины по разные стороны границы
+# (например «гречка» → «гречк», «гречневая» → «гречн»), не совпадут — тогда
+# срабатывает прежнее поведение (дефолтная порция).
+_STEM_LONG_WORD_LEN = 6  # слово длиннее — берём _STEM_LONG_PREFIX букв
+_STEM_LONG_PREFIX = 5
+_STEM_SHORT_PREFIX = 4
+_STEM_MIN_TOKEN_LEN = 3  # предлоги/союзы («и», «с», «на») не участвуют
+_WEIGHT_EQ_TOLERANCE_G = 0.01
+
+
 def _stem(token: str) -> str:
-    """Грубый стем для сравнения русских слов в разных падежах: первые 5 букв (4 для коротких)."""
+    """Грубый стем: первые 5 букв (4 для слов короче 6)."""
     t = token.lower().strip("().,;:!?-")
-    return t[:5] if len(t) >= 6 else t[:4]
+    return t[:_STEM_LONG_PREFIX] if len(t) >= _STEM_LONG_WORD_LEN else t[:_STEM_SHORT_PREFIX]
 
 
 def _stems_overlap(a: str, b: str) -> bool:
-    sa = {_stem(t) for t in a.split() if len(t) > 3}
-    sb = {_stem(t) for t in b.split() if len(t) > 3}
+    sa = {_stem(t) for t in a.split() if len(t) > _STEM_MIN_TOKEN_LEN}
+    sb = {_stem(t) for t in b.split() if len(t) > _STEM_MIN_TOKEN_LEN}
     return bool(sa & sb)
+
+
+def _unique_weight_match(weight: float, regex_weights) -> bool:
+    """LLM-вес совпал ровно с одним из явно указанных пользователем весов.
+    Если одинаковый вес указан у нескольких продуктов — совпадение неоднозначно, не доверяем."""
+    hits = [w for w in regex_weights if abs(w - weight) < _WEIGHT_EQ_TOLERANCE_G]
+    return len(hits) == 1
 
 
 def process_llm_food_data(llm_data: Dict, description: str = None) -> Tuple[List[Dict], Dict[str, float]]:
@@ -666,6 +685,7 @@ def process_llm_food_data(llm_data: Dict, description: str = None) -> Tuple[List
 
     # Pre-calculate regex items if description is available
     regex_items_map = {}
+    regex_weights_list: list = []  # веса по продуктам (не по ключам) — для проверки уникальности совпадения
     if description:
         try:
             from .description_parser import extract_products_from_description, normalize_product_name
@@ -677,6 +697,7 @@ def process_llm_food_data(llm_data: Dict, description: str = None) -> Tuple[List
                     # Use simple normalization
                     n_name = normalize_product_name(p["name"])
                     regex_items_map[n_name] = p["weight"]
+                    regex_weights_list.append(float(p["weight"]))
                     # Also map raw name just in case
                     regex_items_map[p["name"].lower()] = p["weight"]
         except Exception as e:
@@ -705,11 +726,9 @@ def process_llm_food_data(llm_data: Dict, description: str = None) -> Tuple[List
                         break
             if not regex_weight and weight:
                 # Имя не пересекается даже по стемам, но LLM-вес совпадает с явно
-                # указанным пользователем весом одного из продуктов в тексте — доверяем.
-                for r_weight in regex_items_map.values():
-                    if abs(r_weight - weight) < 0.01:
-                        regex_weight = r_weight
-                        break
+                # указанным пользователем весом ровно одного продукта — доверяем.
+                if _unique_weight_match(float(weight), regex_weights_list):
+                    regex_weight = weight
             if regex_weight is not None:
                 weight = regex_weight
                 regex_matched = True
