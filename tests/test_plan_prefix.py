@@ -27,3 +27,17 @@ def test_bare_word_is_not_plan():
 
 def test_planerka_not_plan():
     assert strip_plan_prefix("Планёрка: кофе") == ("Планёрка: кофе", False)
+
+
+def test_voice_caption_equal_to_description_not_duplicated():
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "telegram-bot"))
+    from handlers.photo import merge_caption_and_description
+
+    assert merge_caption_and_description("план: суп", "план: суп") == "план: суп"
+    assert merge_caption_and_description("", "суп") == "суп"
+    assert merge_caption_and_description("фото ужина", "с рисом") == "фото ужина\nс рисом"
+    text, is_plan = strip_plan_prefix(merge_caption_and_description("план: суп", "план: суп"))
+    assert (text, is_plan) == ("суп", True)

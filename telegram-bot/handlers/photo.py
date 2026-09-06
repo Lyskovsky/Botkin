@@ -997,6 +997,20 @@ async def save_document_as_image(message: Message, file_id: str, file_name: str 
 # Это нужно, чтобы текстовые сообщения без фото обрабатывались правильно
 
 
+def merge_caption_and_description(caption: str, description: str) -> str:
+    """Склеить подпись к фото и текст описания в один запрос к LLM.
+
+    Голосовой путь (voice.py) кладёт транскрипт и в caption, и в description —
+    тогда без этой проверки текст дублировался («план: суп\nплан: суп»), и
+    префикс «план:» вырезался только из первой копии (#407).
+    """
+    cap = (caption or "").strip()
+    desc = (description or "").strip()
+    if not cap or cap == desc:
+        return desc
+    return f"{cap}\n{desc}".strip()
+
+
 async def handle_description(
     message: Message, description: str = None, processing_message: Message = None, custom_date: str = None
 ):
@@ -1042,7 +1056,7 @@ async def handle_description(
     logger.info(f"🔍 [DEBUG] user_state.data keys: {list(user_state.data.keys())}")
 
     # Объединяем caption и description
-    full_description = f"{caption}\n{description}".strip() if caption else description
+    full_description = merge_caption_and_description(caption, description)
 
     # Извлекаем дату из описания (поддержка "вчера")
     # Если custom_date не был передан, пытаемся извлечь из текста
