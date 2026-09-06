@@ -703,12 +703,8 @@ async def handle_text_message(message: Message, user_id: int, state: FSMContext)
         "переживать",
     )
     _BP_RANGE_RE = re.compile(r"\d{2,3}\s*-\s*\d{2,3}\s*[/\\]|[/\\]\s*\d{2,3}\s*-\s*\d{2,3}")
-    # 🐛 FIX 04.09.2026: наличие вопросительного маркера БОЛЬШЕ НЕ отменяет
-    # сохранение замера — «170/100 пульс 70, это нормально?» раньше целиком
-    # уходил агенту, замер не сохранялся (см. _bp_confirmation_with_answer
-    # выше: теперь сохраняем детерминированно И отвечаем на вопрос).
-    # Отменяют сохранение только ДИАПАЗОН (описание, не единичный замер) и
-    # ПРОШЕДШЕЕ ВРЕМЯ («вчера было», «раньше бывало» — история, не текущий лог).
+    # Отменяют сохранение ДИАПАЗОН (описание, не единичный замер) и ПРОШЕДШЕЕ
+    # ВРЕМЯ («вчера было», «раньше бывало» — история, не текущий лог).
     _BP_PAST_MARKERS = (
         "было",
         "бывало",
@@ -721,11 +717,20 @@ async def handle_text_message(message: Message, user_id: int, state: FSMContext)
     _is_bp_question = any(m in _lower_text for m in _BP_QUESTION_MARKERS)
     _is_bp_range = bool(_BP_RANGE_RE.search(text))
     _is_bp_past = any(m in _lower_text for m in _BP_PAST_MARKERS)
-    if _is_bp_range or _is_bp_past:
+    # 🐛 FIX 06.09.2026: вопрос БОЛЬШЕ НЕ отменяет сохранение целиком (fix
+    # 04.09.2026 от этого отказался), НО регэксп по-прежнему не может отличить
+    # «170/100 пульс 70, это нормально?» (свой свежий замер) от «правда ли,
+    # что 140/90 — это уже гипертония?» (число в отвлечённом/нормативном
+    # вопросе, не замер). Разница нерегэксп-решаемая — поэтому детерминированный
+    # быстрый путь (без LLM) остаётся ТОЛЬКО для однозначного случая без
+    # вопроса («170/100 пульс 70»). Если есть вопросительный маркер — пропускаем
+    # regex pre-check и отдаём решение LLM-роутеру (SCENARIO 7 в core/llm/router.py),
+    # у которого есть контекст, чтобы отличить «свой замер» от «числа в вопросе».
+    if _is_bp_question or _is_bp_range or _is_bp_past:
         debug_logger.info(
             f"🩺 BP regex SKIPPED for user {user_id}: "
-            f"range={_is_bp_range} past={_is_bp_past} — "
-            f"передаём в агент (text head: {text[:80]!r})"
+            f"question={_is_bp_question} range={_is_bp_range} past={_is_bp_past} — "
+            f"передаём в агент/LLM-роутер (text head: {text[:80]!r})"
         )
         bp_match = None
     else:
@@ -1332,8 +1337,11 @@ async def handle_text_message(message: Message, user_id: int, state: FSMContext)
             sys_v, dia_v, pulse_v = data.get("systolic"), data.get("diastolic"), data.get("pulse")
             # Тот же guard, что и в regex-пути выше: если сообщение — описание
             # диапазона или прошедшее время, не сохраняем замер. Сбрасываем
-            # router_result/msg_type и выпадаем ниже к BotkinClaw. Вопрос
-            # («это нормально?») сохранению больше НЕ мешает — см. FIX 04.09.2026.
+            # router_result/msg_type и выпадаем ниже к BotkinClaw. Вопрос сам
+            # по себе НЕ сбрасывается здесь — если код дошёл до этой ветки,
+            # значит LLM-роутер (SCENARIO 7) уже решил, что это СВОЙ свежий
+            # замер, а не число в отвлечённом/нормативном вопросе, и явно
+            # классифицировал сообщение как "bp" — см. FIX 06.09.2026.
             if _is_bp_range or _is_bp_past:
                 debug_logger.info(
                     f"🩺 BP LLM-router SKIPPED for user {user_id}: "

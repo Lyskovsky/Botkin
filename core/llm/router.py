@@ -419,14 +419,26 @@ SCENARIO 7: BP (blood pressure measurement)
 Use when user sends a blood pressure reading — text like "120/80 пульс 70", "АД 130/85", or a photo of a tonometer (Omron, Microlife, etc) showing SYS/DIA/PULSE values on the display.
 Realistic ranges: systolic 70-250, diastolic 40-150, pulse 30-220, systolic > diastolic.
 
+THE CORE TEST — classify as BP ONLY if the numbers are the user's OWN reading THEY JUST TOOK (a measurement that happened, on them, right now/today). If in doubt, do NOT classify as BP — a false measurement silently corrupts the user's medical history and doctor report; a missed one is at least noticed and re-entered. When unsure, prefer SCENARIO 5 (OTHER).
+
 CRITICAL — DO NOT classify as BP if any of these apply:
 - Message describes a RANGE («давление в интервале 140-120 /85-70», «в диапазоне», «бывает», «иногда», «доходит до», «колеблется») — that's a description for the agent to interpret, not a single measurement.
 - Message is in past tense about past readings («раньше было», «вчера было», «месяц назад») — use OTHER, the agent will look up history.
-A QUESTION about a CURRENT/JUST-TAKEN reading (contains «нужно ли», «можно ли», «опасно ли», «что делать», «что значит», «?», "should I", "is it ok", etc.) does NOT by itself disqualify BP — a fresh measurement mentioned alongside a question is still a real reading and MUST be logged as SCENARIO 7 (BP) so it gets saved; the question part is answered separately by the agent (downstream code handles this — you only need to extract the numbers correctly here).
+- The numbers are NORMATIVE/HYPOTHETICAL/EDUCATIONAL/THIRD-PARTY — i.e. the message asks about a threshold, a rule of thumb, someone else's reading, or "what if" scenario, not the user's own just-taken measurement. Markers: «правда ли, что», «считается нормальным», «при каком давлении», «врач сказал, что при», «если давление», «а если у меня будет», someone else's name + "сказала/сказал, что при". These numbers are illustrative, not a log entry — use OTHER even though the message contains a question mark and BP-shaped numbers.
+
+A QUESTION about a CURRENT/JUST-TAKEN OWN reading (contains «нужно ли», «можно ли», «опасно ли», «что делать», «что значит», «?», "should I", "is it ok", etc.) does NOT by itself disqualify BP — a fresh measurement mentioned alongside a question is still a real reading and MUST be logged as SCENARIO 7 (BP) so it gets saved; the question part is answered separately by the agent (downstream code handles this — you only need to extract the numbers correctly here). But the question mark alone does not make it BP either — apply THE CORE TEST above: is this the user's own fresh reading, or a number used to illustrate a normative/hypothetical question?
+
+Positive example (own fresh reading + question → BP):
 Example: «170/100 пульс 70, это нормально?» → SCENARIO 7 (BP), systolic=170, diastolic=100, pulse=70 (still log it — this is a fresh reading, not history).
+Example: «120/80 пульс 65» → SCENARIO 7 (BP).
+
+Negative examples (range / past tense / normative-hypothetical → OTHER, never BP):
 Example: «У меня давление в диапазоне 140-120/85-70, нужно ли мне пить таблетки?» → SCENARIO 5 (OTHER), NOT bp (this is a RANGE, not a single measurement).
 Example: «Вчера было 150/90, это нормально было?» → SCENARIO 5 (OTHER), NOT bp (past tense — history, not a current log).
-Example: «120/80 пульс 65» → SCENARIO 7 (BP).
+Example: «Правда ли, что 140/90 — это уже гипертония?» → SCENARIO 5 (OTHER), NOT bp (normative question about a threshold, not the user's own reading).
+Example: «Какое давление считается нормальным — 120/80?» → SCENARIO 5 (OTHER), NOT bp (asking about a norm, not reporting a measurement).
+Example: «Таня сказала, при 160/100 надо принимать каптоприл, это так?» → SCENARIO 5 (OTHER), NOT bp (someone else's rule of thumb, not the user's own reading).
+Example: «При каком давлении вызывать скорую, при 180/110?» → SCENARIO 5 (OTHER), NOT bp (hypothetical threshold question, not a measurement taken now).
 {
   "type": "bp",
   "data": {
