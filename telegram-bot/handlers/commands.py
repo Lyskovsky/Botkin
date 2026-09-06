@@ -59,7 +59,7 @@ async def cmd_start(message: Message, user_id: int, username: str, first_name: s
     setup_hint = ""
     if not has_activity and not has_manual_bmr:
         setup_hint = (
-            "\n⚙️ <b>Нет данных о калориях?</b> Введи /setup BMR 1400 активные 250 "
+            "\n⚙️ <b>Нет данных о калориях?</b> Введи /setup_calories BMR 1400 активные 250 "
             "— бот сразу начнёт считать твой бюджет. Или просто логируй еду, "
             "цели подстроятся по мере накопления данных.\n"
         )
@@ -110,7 +110,8 @@ async def cmd_help(message: Message):
         "/vitamins — Чек-лист и схема приема.\n"
         "/share — Личный дашборд здоровья (ссылка).\n"
         "/profile — Настройка профиля (рост, возраст, цель).\n"
-        "/setup — Настройка BMR и активных ккал (без Garmin).\n"
+        "/setup — Дозаполнить профиль, если чего-то не хватает (рост/вес/цель и т.п.).\n"
+        "/setup_calories — Настройка BMR и активных ккал вручную (без Garmin).\n"
         "/activity &lt;число&gt; — Ввести активные калории за сегодня вручную.\n"
         "/help — Эта справка."
     )
@@ -540,20 +541,20 @@ async def cmd_status_alias(message: Message):
 import re
 
 
-@router.message(Command("setup"))
+@router.message(Command("setup_calories"))
 async def cmd_setup(message: Message, user_id: int):
     """
     Настройка калорий для пользователей без Garmin.
-    Примеры: /setup BMR 1400 активные 250
-             /setup BMR 1400, активные 250, вес 60
+    Примеры: /setup_calories BMR 1400 активные 250
+             /setup_calories BMR 1400, активные 250, вес 60
     """
-    text = (message.text or "").replace("/setup", "").strip()
+    text = (message.text or "").replace("/setup_calories", "").strip()
     if not text:
         await message.answer(
             "⚙️ <b>Настройка целей (для пользователей без Garmin)</b>\n\n"
             "Укажи BMR и средние активные калории из Apple Health (Здоровье → Энергия):\n\n"
-            "<code>/setup BMR 1400, активные 250</code>\n"
-            "<code>/setup BMR 1400 активные 250 вес 60</code>\n\n"
+            "<code>/setup_calories BMR 1400, активные 250</code>\n"
+            "<code>/setup_calories BMR 1400 активные 250 вес 60</code>\n\n"
             "• BMR — базовая энергия (ккал/день)\n"
             "• Активные — среднее сжигание от движения\n"
             "• Вес — для расчёта белков (опционально)",
@@ -583,7 +584,9 @@ async def cmd_setup(message: Message, user_id: int):
         weight = float(m.group(1).replace(",", "."))
         break
     if not bmr and not active and not weight:
-        await message.answer("❌ Не удалось распознать BMR, активные или вес. Пример: /setup BMR 1400 активные 250")
+        await message.answer(
+            "❌ Не удалось распознать BMR, активные или вес. Пример: /setup_calories BMR 1400 активные 250"
+        )
         return
     from database import SessionLocal
     from database.crud import update_user_calorie_settings
@@ -657,8 +660,8 @@ async def cmd_burn(message: Message, user_id: int):
 
 @router.message(Command("targets"))
 async def cmd_targets(message: Message):
-    """Redirect to /setup"""
-    await message.answer("Используй /setup для настройки BMR и активных калорий.")
+    """Redirect to /setup_calories"""
+    await message.answer("Используй /setup_calories для настройки BMR и активных калорий.")
 
 
 # ── Admin commands ────────────────────────────────────────────────────────────
