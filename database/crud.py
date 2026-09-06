@@ -1341,6 +1341,20 @@ def _create_leftover_plan(db: Session, user_id: int, leftover_to: dict, leftover
     return leftover_row
 
 
+def _leftover_summary(leftover_id: Optional[int], leftover_to: dict, leftover_items: List[dict]) -> dict:
+    """Единая форма описания остатка для dry-run и реальной записи (id=None в dry-run)."""
+    mt = leftover_to.get("meal_time")
+    return {
+        "id": leftover_id,
+        "date": leftover_to["date"].isoformat(),
+        "meal_time": mt.strftime("%H:%M") if mt else None,
+        "meal_name": leftover_to.get("meal_name"),
+        "status": "plan",
+        "items": leftover_items,
+        "totals": _recalc_totals(leftover_items),
+    }
+
+
 def adjust_meal_items(
     db: Session,
     meal_id: int,
@@ -1376,7 +1390,7 @@ def adjust_meal_items(
     deleted = not kept_items
 
     result = {
-        "meal": {"id": row.id, "date": row.date, "meal_name": row.meal_name, "status": new_status},
+        "meal": {"id": row.id, "date": row.date.isoformat(), "meal_name": row.meal_name, "status": new_status},
         "before_totals": before_totals,
         "after_totals": after_totals,
         "changes": change_log,
@@ -1385,12 +1399,7 @@ def adjust_meal_items(
     }
 
     if leftover_to and leftover_items:
-        preview_totals = _recalc_totals(leftover_items)
-        result["leftover"] = {
-            "id": None,
-            "meal_name": leftover_to.get("meal_name"),
-            "totals": preview_totals,
-        }
+        result["leftover"] = _leftover_summary(None, leftover_to, leftover_items)
 
     if dry_run:
         return result
@@ -1408,7 +1417,7 @@ def adjust_meal_items(
 
     if leftover_to and leftover_items:
         leftover_row = _create_leftover_plan(db, user_id, leftover_to, leftover_items)
-        result["leftover"] = {"id": leftover_row.id, "meal_name": leftover_row.meal_name}
+        result["leftover"] = _leftover_summary(leftover_row.id, leftover_to, leftover_items)
 
     db.commit()
     if not deleted:
