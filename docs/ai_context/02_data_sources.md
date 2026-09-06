@@ -1,9 +1,10 @@
 ﻿# 02 · Реестр источников данных
 
-> **Last verified (SQL примеры):** 2026-04-21
-> **Last verified (источники):** 2026-04-02 (некоторые таблицы метрик могут отставать на 2-3 недели)
+> **Last verified:** 2026-09-06 (после добавления BotkinClaw, MCP-коннектора, CGM и режима план→факт — добавлены источники CGM/LibreLinkUp, Withings, Whoop, Android Health Connect)
+>
+> ⚠️ Даты образцов/цифр покрытия в этом файле частично унаследованы из более ранних ревью (видны по разбросу дат «последнее измерение» ниже) — они иллюстрируют **формат** SOP, а не текущий снимок. Актуальные цифры покрытия — смотреть в `/dashboard` skill, не здесь.
 
-В этом файле описаны все интеграции HealthVault, методы получения данных, статус актуальности и SOP «как подтянуть свежие данные».
+В этом файле описаны все интеграции Botkin, методы получения данных, статус актуальности и SOP «как подтянуть свежие данные».
 
 > [!IMPORTANT]
 > **Канонические имена полей** (часто путаются):
@@ -22,10 +23,11 @@
 
 | Метрика | Источник | Как читать |
 |---|---|---|
-| 🍽️ **Питание** (ккал, белки, жиры, углеводы) | **PostgreSQL** `nutrition_log` | SSH → psql (см. SQL ниже) |
-| ⚖️ **Вес** (kg, % жира, мышцы) | **PostgreSQL** `weights` | SSH → psql |
+| 🍽️ **Питание** (ккал, белки, жиры, углеводы, план vs факт) | **PostgreSQL** `nutrition_log` (`status` = `eaten`/`plan`) | SSH → psql (см. SQL ниже) или agent tool `recent_meals`/`meal_context` |
+| ⚖️ **Вес** (kg, % жира, мышцы, вода, кости, висцеральный жир) | **PostgreSQL** `weights` (HAE/Zepp/**Withings**/ручные — см. §9) | SSH → psql или agent tool `weight_history` |
 | 💊 **Добавки** | **PostgreSQL** `supplements_log` | SSH → psql |
-| 🩺 **АД** (систола, диастола, пульс) | Локально: `data/apple_health_blood_pressure.json` | `json.load()` |
+| 🩺 **АД** (систола, диастола, пульс) | **PostgreSQL** `blood_pressure_logs` (Omron → HAE, ежедневно автоматически) | SSH → psql или agent tool `recent_bp`. Локальный `data/apple_health_blood_pressure.json` — только исторический архив до перехода на HAE, не читается автоматически. |
+| 🩸 **Глюкоза (CGM)** | **PostgreSQL** `glucose_readings` (LibreLinkUp, ночной синк + on-demand refresh) | agent tool `recent_glucose`/`glucose_stats` — см. §16b |
 | 👣 **Шаги** (ежедневные) | Локально: `data/apple_health_steps_daily.json` | `json.load()` |
 | 💤 **Сон** (длительность, фазы, HRV ночи) | Локально: `data/garmin/sleep/YYYY-MM-DD.json` | glob по дням |
 | ❤️ **ЧСС покоя, стресс, BB** | Локально: `data/garmin/daily-summary/YYYY-MM-DD.json` | glob по дням, поле `data['stats']` |
@@ -160,11 +162,11 @@ GROUP BY date ORDER BY date;\""
 ---
 
 ## 5. 🩺 Артериальное давление (АД)
-* **Данные**: Систолическое/диастолическое давление, пульс при измерении.
-* **Канал**: Apple Health → `data/apple_health_blood_pressure.json`. 141 измерение.
-* **Актуальность**: Последнее измерение — **9 марта 2026** ✅.
-* 💡 **Статус**: ✅
-* 🛠 **Как обновить**: Экспорт Apple Health → `python3 scripts/import_apple_health.py`.
+* **Данные**: Систолическое/диастолическое давление, пульс при измерении (Omron).
+* **Канал (основной, автоматический)**: Health Auto Export (iOS) → `POST /apple_health_v2` → таблица PostgreSQL `blood_pressure_logs`, ежедневно без участия пользователя. Читает агент (`recent_bp` tool) и `/day`.
+* **Канал (архивный)**: `data/apple_health_blood_pressure.json` — история из ручных XML-экспортов Apple Health до перехода на HAE; НЕ обновляется автоматически, не путать с актуальными данными.
+* 💡 **Статус**: ✅ автоматизировано через HAE.
+* 🛠 **Как обновить**: ничего делать не нужно — HAE шлёт раз в сутки сам. Проверить руками: agent tool `recent_bp` или `psql -c "SELECT * FROM blood_pressure_logs WHERE user_id=X ORDER BY measured_at DESC LIMIT 5"`.
 
 ---
 
@@ -220,17 +222,17 @@ GROUP BY date ORDER BY date;\""
 ---
 
 ## 9. ⚖️ Вес и Состав тела
-* **Данные**: Вес, процент жира, мышечная масса, % воды, висцеральный жир, ИМТ, масса костей.
+* **Данные**: Вес, процент жира, мышечная масса, % воды, висцеральный жир, ИМТ, масса костей, пульс покоя (Withings), BMR по составу тела (Withings).
 * **Каналы**:
-  - **PostgreSQL `weights`** — вес + состав тела (Zepp). 670 записей. Источник: Telegram-бот OCR или scaleconnect.
-  - **`data/zepp_export_latest.csv`** — прямой CSV с Zepp API (`scripts/import_zepp_api.py` через CN3 → Hetzner). ✅ Работает.
-  - **`data/apple_health_weight_daily.json`** — только вес, без состава. 569 дней. Синхронизируется через Apple Health → ручной экспорт. Актуально до **15 марта 2026** ✅.
-* **Актуальность**: Вес ✅ (Apple Health до сегодня). Состав тела (жир%, мышцы) ⚠️ — последний раз 9 марта.
-* 💡 **Статус**: ✅ Zepp состав тела — работает через `import_zepp_api.py` (CN3 → Hetzner)
+  - **PostgreSQL `weights`** — единая таблица для всех каналов (Zepp/Withings/HAE/ручные), различаются полем `source`.
+  - **`data/zepp_export_latest.csv`** — прямой CSV с Zepp API (`scripts/import/zepp_api.py` через CN3 → Hetzner).
+  - **Withings** (весы Body Smart) — полный состав тела (мышцы/вода/кости/висцеральный жир), которых нет в HealthKit (см. §9c).
+  - **`data/apple_health_weight_daily.json`** — только вес, без состава. Синхронизируется через Apple Health → ручной экспорт (историческая линия, редко обновляется).
+* **Единый канал записи для внешних импортёров**: `POST /api/agent/log_body_composition` (PAT+JWT, scope `rw`) — `user_id` берётся из токена, RLS изолирует данные, доступ к прод-серверу/суперюзер Postgres не нужен. `measured_at` обязан нести UTC-офсет (ключ идемпотентности), `source` — имя канала. Заменяет старую схему «ssh + `docker exec psql`», которая требовала членства в docker-группе (= root на хосте).
 * 🛠 **Как обновить**:
-  - *Вес:* Экспорт Apple Health → `python3 scripts/import_apple_health.py`. Zepp → iPhone → Apple Health автоматически.
-  - *Состав тела:* `python3 scripts/import_zepp_api.py` (автоматически, в /sync). Если токен истёк → `--reauth`.
-  - *Починить scaleconnect*: нужна переаутентификация через Google OAuth. Аккаунт: lyskovsky@gmail.com.
+  - *Вес:* Экспорт Apple Health → `python3 scripts/import/apple_health.py`. Zepp → iPhone → Apple Health автоматически.
+  - *Состав тела (Zepp):* `python3 scripts/import/zepp_api.py` (автоматически, в /sync). Если токен истёк → `--reauth`.
+  - *Полный состав тела (Withings):* `python3 scripts/import/withings_api.py --user <tg_id> --push-api --min-weight <кг>` (пишет через `log_body_composition`).
 
 ## 9b. ⚖️ Умные весы Zepp — полная интеграция (ВОССТАНОВЛЕНА 15.03.2026)
 
@@ -274,6 +276,18 @@ python3 scripts/import_zepp_api.py --days 365
 # Переавторизация (когда токен истёк):
 python3 scripts/import_zepp_api.py --reauth
 ```
+
+---
+
+## 9c. ⚖️ Весы Withings (Body Smart) — полный состав тела
+
+* **Зачем нужен ещё один канал весов**: в **HealthKit нет типов** для мышечной массы, воды, костной массы, висцерального жира — через Health Auto Export доходят только вес, % жира и безжировая масса. Withings API отдаёт всё целиком напрямую, без прогонки через Apple Health.
+* **Устройство**: весы Withings Body Smart → Withings API (OAuth).
+* **Скрипт**: `scripts/import/withings_api.py --user <telegram_id> --push-api --min-weight <кг>` — пишет через `POST /api/agent/log_body_composition` с `BOTKIN_PAT` (не нужен SSH-доступ к серверу, см. §9 выше).
+* **Дополнительные поля**: `heart_rate` (пульс стоя натощак — по сути пульс покоя; вскрыл фоновую тахикардию, которая по данным часов выглядела эпизодической), `bmr_kcal` (точнее оценки Apple по возрасту/весу), `fat_mass_kg`, `lean_mass_kg`.
+* **Апсерт с COALESCE** — канал HAE не перетирается, если Withings синкнулся позже.
+* **Креды**: `WITHINGS_CLIENT_ID/SECRET/REFRESH_TOKEN` в `.env`; refresh-токен **ротируется** при каждом использовании → кэш в `data/cache/withings_tokens.json`.
+* 🛠 **Как обновить**: `python3 scripts/import/withings_api.py --user <tg_id> --push-api --min-weight <кг>` (обычно вручную/по cron, не часть общего `/sync`).
 
 ---
 
@@ -329,15 +343,61 @@ python3 scripts/import_zepp_api.py --reauth
 ---
 
 ## 16. 🩸 Анализы крови / мочи / гормоны / витамины (CMD, Invitro, Helix, КДЛ)
-* **Данные**: Все лабораторные показатели — биохимия, липиды, гормоны, витамины, ПСА, ОАМ. По всей семье (5 KB-файлов).
+* **Данные**: Все лабораторные показатели — биохимия, липиды, гормоны, витамины, ПСА, ОАМ. По всей семье (per-user KB-файлы).
 * **Источник истины**: `~/FamilyHealth/<Имя>/knowledge_base.json` **на маке** (приватные мед-документы не хранятся вне локалки в исходном виде). PDF-оригиналы лежат рядом.
-* **3 production-канала на сервере** (читают разное, поэтому ВСЕ должны быть синхронизированы):
-  1. `/app/telegram-bot/biomarkers_<id>.json` — **flat dict** для дашборда (`dashboard_generator.py`). Только последнее значение + history по каждому маркеру.
-  2. **PostgreSQL `blood_tests`** — для агента (`/recent_biomarkers` в `agent_tools_api.py`). Полные ряды с jsonb-values.
-  3. `/app/data/kb/kb_<id>.json` (bind-mount из `/opt/healthvault/data/kb/`) — для агента (`/kb_value`, `/list_kb_keys`). Целый KB.
-* **Актуальность**: Александр 75 тестов, latest 2026-05-23 ✅. Папа/Андрей/Олег/Игорь — per-user.
-* 💡 **Статус**: ✅ автоматизировано (с 24.05.2026, см. workflow 13 в `04_workflows.md`).
-* 🛠 **Как обновить**: одна команда **`python3 scripts/generate_biomarkers_json.py --deploy`** — обновляет все 3 канала за раз для Александра. Для других юзеров — пока через `sync_family_kb.py` + `kb_to_blood_tests.py` отдельно (TBD: расширить generate_biomarkers_json на `--all-users`).
+* **2-source pipeline + read-time канонизация** (унифицировано 01.06.2026, см. `core/health/kb_schema.py`; заменяет прежнюю схему с 3 разными форматами ключей):
+  1. **PostgreSQL `blood_tests`** (сырые `values`) — читает **дашборд** (`dashboard_generator._load_biomarkers_from_db` → `aggregate_biomarkers`) **и агент** (`/recent_biomarkers`, `/phenoage`). Канонизация ключей/единиц — на лету, через `kb_schema.to_canonical` (единый реестр алиасов + US→метрика конверсия по признаку `_unit_system`). Дашборд **не читает** отдельный flat-JSON файл — эта промежуточная стадия удалена (legacy-fallback `BOTKIN_LEGACY_BIOMARKERS_JSON` убран 11.06.2026, флаг нигде не включался).
+  2. `/app/data/kb/kb_<id>.json` (bind-mount) — читает агент (`/kb_value`, `/list_kb_keys`). Целый KB как есть.
+* **Третий писатель — `/doc` в боте (#281, см. §17 ниже)** — пользователь сам грузит анализ через `/doc`, пишет прямо в `blood_tests`, минуя мак. Эти данные **не попадают обратно** в локальный `knowledge_base.json` автоматически.
+* 💡 **Статус**: ✅ автоматизировано.
+* 🛠 **Как обновить (после правки локального KB на маке)**: одна команда для любого юзера — **`python3 scripts/sync_user_health.py --user <telegram_id> --apply`** (или `--all`). Две идемпотентные стадии: KB → bind-mount `kb_<id>.json`, KB → Postgres `blood_tests`. Маппинг `telegram_id → папка` — `config/users.py::KB_USERS`.
+
+---
+
+## 16b. 🩸 Глюкоза непрерывного мониторинга (CGM, LibreLinkUp, #96)
+
+* **Данные**: Точки глюкозы каждые ~5-15 мин (ммоль/л), стрелка тренда.
+* **Устройство**: Abbott FreeStyle Libre 3 → приложение FreeStyle LibreLink → LibreLinkUp (follower API, неофициальный, реверс-инжинирен сообществом).
+* **Подключение (`/connect_cgm` в боте)** — два пути:
+  - **Путь A (регион EU)**: пригласить в LibreLink сервисный follower-аккаунт `dr@botkin.health` — бот сам находит новый `patient_id` (поллинг 30с до 10 мин) и мапит на `telegram_id` в таблицу `cgm_connections`.
+  - **Путь B (свой follower-аккаунт, #381)** — обязателен для НЕ-EU регионов (LibreLinkUp приглашения работают только внутри одного региона Abbott). Пользователь заводит собственный follower-аккаунт под свой регион, вводит креды в бота (пароль удаляется из чата немедленно, логин валидируется live ДО сохранения). Креды хранятся зашифрованными в `cgm_followers.password_enc`. Rate-limit на попытки логина (5/15 мин) — регион-специфичный анти-бан на стороне Abbott реагирует на частые неудачные попытки блокировкой Cloudflare 476 для всего региона (см. `core/health/glucose_runtime.py`).
+* **Канал**: `scripts/import/librelinkup.py` — ночной синк по cron (`scripts/server/sync_all.sh`) для всех подключённых пользователей + follower-аккаунтов; хранит канонический UTC-timestamp, конвертирует mg/dL→mmol/L.
+* **On-demand refresh**: agent tool `/recent_glucose` дёргает live-обновление перед ответом (10с таймаут), но не блокируется — при ошибке/кулдауне отдаёт то, что уже есть в БД.
+* **Метрики**: `core/health/glucose_stats.py` — Time-in-Range (ADA/EASD пороги 3.9–10.0 ммоль/л), avg/min/max/std. Свежесть данных (`glucose_staleness`, порог 30 мин) — только для формулировки ответа, не фильтрует данные.
+* **Хранилище**: PostgreSQL `glucose_readings`. **Не показывается на публичном дашборде** — доступно только через агент (BotkinClaw/MCP), см. `03_database_schema.md` §12.
+* 💡 **Статус**: ✅ автоматизировано (ночной синк) + on-demand refresh.
+* 🛠 **Как подключить**: `/connect_cgm` в боте. Дизайн — [ADR-0005](../architecture/decisions/0005-cgm-librelinkup-integration.md), грабли региона — `docs/researches/2026-06-14-cgm-librelinkup-integration.md`.
+
+---
+
+## 17. 📄 Пользовательская загрузка анализов (`/doc`, #281)
+
+* **Данные**: Тот же тип, что и §16 (лабораторные показатели), но вводится самим пользователем через Telegram, не Александром на маке. Также принимает нелабораторные документы (УЗИ, заключения врача) — они архивируются, но не парсятся в биомаркеры.
+* **Канал**: `/doc` → фото/PDF → `core/health/doc_extractor.py` (LLM-извлечение, Anthropic `claude-haiku-4-5`) → превью с подсветкой новых аллергий/диагнозов → «Сохранить» → `handlers/doc_upload.py:_save_to_blood_tests` → `core/health/doc_to_blood_test.py` → `database.crud.upsert_blood_test`.
+* **Идемпотентность**: ключ `(user_id, test_date, test_type)`, где `test_type = "<лаборатория> · <8hex-хэш-файла>"` — повторная загрузка того же файла обновляет ту же строку.
+* **Нелабораторные документы** (УЗИ, заключения) — не проходят гейт `to_canonical`, в `blood_tests` не попадают, остаются только в `documents[]` внутри `/app/data/kb/kb_<id>.json`.
+* **Документ без даты** — строка не создаётся (дата не выдумывается).
+* ⚠️ **Следствие**: данные от `/doc` живут только на сервере. `sync_user_health.py` их не затирает (upsert без DELETE), но и не подтягивает обратно в локальный `knowledge_base.json` на маке — если нужно свести, переносить руками.
+* 💡 **Статус**: ✅ в проде.
+
+---
+
+## 18. ⌚ Whoop (носимое, мультиюзерное подключение)
+
+* **Данные**: Восстановление, нагрузка, сон — через собственный OAuth Whoop.
+* **Канал**: `/whoop` в боте → `webhook/whoop_oauth.py` (`GET /whoop/connect?uid=...`, `GET /whoop/callback`) → OAuth 2.0 обмен на токены → `data/cache/whoop_tokens.json` (ключ `whoop:<telegram_id>`), переживает рестарт (bind-mount). Импорт данных — `scripts/import/whoop_api.py`.
+* **Ограничение**: один Whoop developer-app обслуживает до 10 пользователей без approval (development mode) — дальше нужна заявка Whoop на approval.
+* 💡 **Статус**: подключение работает для мультиюзера; per-user данные зависят от того, подключил ли пользователь свой Whoop.
+
+---
+
+## 19. 🤖 Android Health Connect
+
+* **Данные**: То же покрытие, что и Apple Health (шаги, пульс, сон и т.п.), но с Android-устройств.
+* **Канал**: приложение [mcnaveen/health-connect-webhook](https://github.com/mcnaveen/health-connect-webhook) (APK) → `POST /android_health_v1` (Bearer `users.health_token`, та же таблица токенов, что у Apple Health).
+* **Ключевое отличие от HAE**: Health Connect шлёт сырые записи с временными метками (`{count, start_time, end_time}`), не готовые дневные агрегаты — агрегация по дням делается на сервере, в таймзоне пользователя (`users.timezone`), иначе записи после 21:00 МСК уезжают на следующий день.
+* **Источник в БД**: `activity_log.source = 'health_connect'`.
+* 💡 **Статус**: ✅ в проде, для пользователей на Android.
 
 ---
 

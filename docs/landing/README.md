@@ -1,18 +1,23 @@
 # 🌐 Landing page
 
-Лендинг-страница проекта. Будет хоститься на отдельном поддомене (например `healthvault.orangegate.cc` или `tonus.orangegate.cc`) или на отдельном домене (`tonus.health` если купим).
+Лендинг проекта. Хостится на `botkin.health` — статикой, nginx раздаёт файлы из
+`/opt/botkin-site/` на сервере (Hetzner). Деплой — **ручной scp**, не git push:
+
+```bash
+scp docs/landing/index.html root@116.203.213.137:/opt/botkin-site/index.html
+scp docs/landing/user_guide.html root@116.203.213.137:/opt/botkin-site/user_guide.html
+scp docs/landing/mcp_guide.html root@116.203.213.137:/opt/botkin-site/mcp_guide.html
+```
 
 ## Структура
 
 ```
 docs/landing/
-├── index.html          ← одностраничный лендинг (single-file)
-├── assets/             ← фото, скриншоты, фавиконы
-│   ├── alexander-2026-05.jpg  ← положи сюда фото автора проекта
-│   ├── og-cover.png    ← OG-картинка для соцсетей (1200×630)
-│   ├── favicon.png     ← фавикон 32×32
-│   └── ...
-└── README.md           ← этот файл
+├── index.html          ← главный лендинг (single-file)
+├── user_guide.html      ← короткий гайд по боту (10 минут на старт)
+├── mcp_guide.html       ← гайд по подключению Claude Desktop через MCP
+├── assets/              ← фото, скриншоты, фавиконы
+└── README.md            ← этот файл
 ```
 
 ## Палитра
@@ -28,25 +33,8 @@ docs/landing/
 | `--g` | `#00ff9d` | акцент (CTA, ссылки) |
 | `--y` | `#ffb800` | предупреждения / tag-stub |
 
-Менять везде одновременно в `index.html`, `telegram-bot/mc_template.html`, `webhook/admin.py` (он наследует ту же палитру).
-
-## Имя проекта — placeholder
-
-В файле везде стоит `Botkin` как placeholder. Когда выберется финальное имя (см. `todo.md` → раздел «Имя проекта»), сделать:
-
-```bash
-cd docs/landing
-sed -i '' 's/Botkin/Tonus/g' index.html   # пример
-```
-
-Также заменить `LAST_UPDATED` на текущую дату при деплое.
-
-## Что нужно добавить
-
-- [ ] **Фото автора проекта** в `assets/alexander-2026-05.jpg` (drag-and-drop из чата)
-- [ ] **Скриншоты mini-app/dashboard** — на сейчас лендинг ссылается на `../user_guide/screenshots/` (общие с гайдом)
-- [ ] **OG-cover** для шаринга в Telegram/соцсетях (1200×630, темная палитра)
-- [ ] **Favicon** 32×32 — иконка бота или абстрактная (зелёный кружок?)
+Менять везде одновременно в `index.html`, `user_guide.html`, `mcp_guide.html`,
+`telegram-bot/mc_template.html`, `webhook/admin.py` (наследует ту же палитру).
 
 ## Как смотреть локально
 
@@ -56,21 +44,14 @@ python3 -m http.server 8000
 # открыть http://localhost:8000/
 ```
 
-(Картинки могут не загрузиться если они в `../user_guide/screenshots/` — для теста скопируй сюда временно.)
+## После правок — не забыть
 
-## Деплой (планируется в Sprint 4)
+1. Проверить баланс тегов (`<div>`, `<details>`, `<a>`) перед деплоем — файлы правятся руками, без сборки.
+2. scp на сервер (см. выше) — git push репозиторий обновляет, сайт нет.
+3. Если менялась версия/дата в футере — она нигде больше не подтягивается автоматически, только руками.
 
-Один из вариантов:
+## Дальше можно
 
-1. **Cloudflare Pages** — auto-build из git, статика, бесплатно. Лучший для standalone.
-2. **FastAPI endpoint** — `/` в существующем приложении отдаёт этот HTML. Один сервер, один сертификат.
-
-Решение по домену — после выбора имени проекта.
-
-## TODO для следующих итераций
-
-- [ ] EN-версия (перед конференцией в июне)
-- [ ] Видео-демо 30 сек в hero
-- [ ] Real testimonials от family-cohort/Андрея (с их согласия)
-- [ ] Блог-секция (если будут публикации)
-- [ ] Roadmap section с прогрессом
+- [ ] EN-версия
+- [ ] Видео-демо в hero
+- [ ] Testimonials от пилотных пользователей (с их согласия)

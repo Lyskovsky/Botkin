@@ -6,9 +6,9 @@
 2. Шлёт пользователю сообщение через Bot API — бот инициирует разговор
 
 Использование:
-    python3 scripts/send_checkup.py --user 33831673
-    python3 scripts/send_checkup.py --user 33831673 --dry-run  # только показать что будет
-    python3 scripts/send_checkup.py --user 33831673 --reset    # сбросить checkup_mode
+    python3 scripts/send_checkup.py --user <telegram_id>
+    python3 scripts/send_checkup.py --user <telegram_id> --dry-run  # только показать что будет
+    python3 scripts/send_checkup.py --user <telegram_id> --reset    # сбросить checkup_mode
 
 Требует: TELEGRAM_BOT_TOKEN в .env и SSH-доступ к серверу (alias botkin)
 """

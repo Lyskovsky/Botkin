@@ -29,7 +29,7 @@ MSK = ZoneInfo("Europe/Moscow")
 
 def _csv(header_unit="mmol/L", rows=None):
     lines = [
-        "Имя пациента,Селезнёва Ника",
+        "Имя пациента,Тестова Тест",
         f"Device,Serial Number,Device Timestamp,Record Type,Historic Glucose {header_unit},"
         f"Scan Glucose {header_unit},Notes",
     ]
@@ -120,7 +120,7 @@ def test_empty_data_returns_empty():
 def test_russian_localized_headers():
     """Аккаунт RU-локали: заголовки на русском — должны распознаться (язык не важен)."""
     content = (
-        "Имя пациента,Селезнёва Ника\n"
+        "Имя пациента,Тестова Тест\n"
         "Прибор,Серийный номер,Метка времени устройства,Тип записи,"
         "Глюкоза за прошлый период ммоль/л,Глюкоза при сканировании ммоль/л,Заметки\n"
         "FreeStyle Libre 3,A1,15-06-2026 08:00,0,5.4,,\n"

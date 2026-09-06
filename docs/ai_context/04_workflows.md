@@ -1,6 +1,6 @@
 ﻿# 04 · Workflows (SOP для ИИ-ассистентов)
 
-> **Last verified:** 2026-04-21
+> **Last verified:** 2026-09-06 (после добавления BotkinClaw, MCP-коннектора, CGM и режима план→факт — переписан деплой на GitHub Actions/Alembic, добавлены workflow'ы agent tool / MCP-коннектор / CGM / план→факт)
 
 Стандартные операционные процедуры. Когда тебя просят сделать «X» — найди X в этой доке и следуй шагам. Если процедуры нет — добавь её сюда после первого выполнения.
 
@@ -10,39 +10,39 @@
 
 1. **Сначала grep, потом код.** Почти всё уже написано — `grep -rn 'thing' .` экономит часы.
 2. **Один коммит = одна логическая задача.** Не миксовать рефакторинг и фичу.
-3. **AI_CHANGELOG.md обновлять при завершении** любой непустой задачи. Формат: `[YYYY-MM-DD] Описание (затронутые файлы) - Автор`.
-4. **Тесты перед commit:** `./venv/bin/python3 -m pytest tests/ --ignore=tests/test_live_llm.py -q`. Должно быть 0 failed.
+3. **AI_CHANGELOG.md обновлять при завершении** любой непустой задачи (файл локальный, не коммитится — см. `.gitignore`).
+4. **Тесты перед commit:** `PYTHONPATH=. pytest tests/ -v --ignore=tests/integration --ignore=tests/test_nutrition_parsing.py`. Должно быть 0 failed.
 5. **Pre-commit hook сам форматирует Python через ruff** — если коммит «упал» из-за форматирования, просто `git add -A && git commit` ещё раз.
+6. **Никогда `git add -A`** — рядом с кодом живут сознательно незакоммиченные файлы; стейджить только свои пути.
 
 ---
 
 ## 1. Деплой кода в продакшен
 
-⚠️ Нет CI/CD. Деплой — ручной `docker cp` + `docker restart`.
+**Только через GitHub Actions**, workflow «Deploy prod» (`.github/workflows/deploy-prod.yml`). Ручной `docker cp`/`docker restart` в прод-контейнер — **анти-паттерн**, изменения не переживут следующий деплой.
 
 ```bash
-SERVER_PASS=$(grep -m1 'PASS=' "scripts/util/diagnose_remote.sh" | cut -d'"' -f2)
-SCP="/opt/homebrew/bin/sshpass -p $SERVER_PASS scp -o StrictHostKeyChecking=no"
-SSH="/opt/homebrew/bin/sshpass -p $SERVER_PASS ssh -o StrictHostKeyChecking=no"
+# ВАЖНО: сначала push в remote — деплой берёт код из GitHub, не с локальной машины
+git push origin dev   # или main, в зависимости от того что деплоим
 
-# 1. Скопировать файл на сервер
-$SCP path/to/changed.py root@116.203.213.137:/tmp/changed.py
+# Запуск деплоя (ветка по умолчанию main)
+gh workflow run deploy-prod.yml -f branch=main
 
-# 2. Положить в контейнер и рестартануть
-$SSH root@116.203.213.137 "docker cp /tmp/changed.py healthvault_bot:/app/path/to/changed.py && docker restart healthvault_bot"
-
-# 3. Дождаться старта (~6 сек) и проверить логи
-sleep 8
-$SSH root@116.203.213.137 "docker logs healthvault_bot --tail 15 2>&1 | grep -iE 'error|готов|команды'"
+# Откат на готовый образ — сборка пропускается
+gh workflow run deploy-prod.yml -f image_tag=<готовый-тег-образа>
 ```
 
-**Про мини-апп:** при изменении `index.html` / `day.js` / `api.js` / `day.css` — те же шаги. Хеш auto-versioning (`?v=<md5>`) у статики обновится автоматически (вычисляется из mtime в `apple_health.py:_webapp_version()`). Telegram WebView подтянет свежий — но **сначала пользователю надо полностью закрыть мини-апп** (свайп из многозадачности на iPhone), иначе кеш WebView держит старую версию.
+Workflow: собирает Docker-образ бота (job `build`, reusable `build-images.yml`), пушит в GHCR (`ghcr.io/botkin-health/botkin-bot`), затем по SSH на сервере (`/opt/botkin`) выполняет `docker compose -f docker-compose.prod.yml pull && up -d --wait` (pull-only, **без сборки на сервере**). `.env` лежит на сервере, в репозиторий не входит. Подробнее — `docs/DEPLOYMENT.md`.
+
+⚠️ **Прод деплоится с `main`, не с `dev`.** С 18.06.2026: `dev` → авто-деплой на дев-стенд (`@botkin_dev_bot`, `dev.botkin.health`), `main` → прод (через PR `dev→main` + ручной `gh workflow run deploy-prod.yml -f branch=main`).
+
+**Про мини-апп:** при изменении `index.html` / `day.js` / `dashboard.js` / `api.js` / `day.css` / `settings.js` — тот же деплой (не отдельный шаг). Хеш auto-versioning (`?v=<md5>`) у статики обновится автоматически (вычисляется из mtime в `apple_health.py:_webapp_version()`). Telegram WebView подтянет свежий — но **сначала пользователю надо полностью закрыть мини-апп** (свайп из многозадачности на iPhone), иначе кеш WebView держит старую версию.
 
 **Smoke test после деплоя** (auth должен корректно отбивать):
 ```bash
 $SSH root@116.203.213.137 "
-  curl -sk -o /dev/null -w 'webapp: %{http_code}\n' https://health.orangegate.cc/webapp/
-  curl -sk -o /dev/null -w 'settings: %{http_code}\n' -H 'Authorization: tma x' https://health.orangegate.cc/api/settings
+  curl -sk -o /dev/null -w 'webapp: %{http_code}\n' https://botkin.health/webapp/
+  curl -sk -o /dev/null -w 'settings: %{http_code}\n' -H 'Authorization: tma x' https://botkin.health/api/settings
 "
 # Ожидаем: webapp 200, settings 403 (отбивает невалидный токен)
 ```
@@ -85,17 +85,15 @@ LLM-роутинг живёт в `core/llm/router.py` (главный classifier
 
 ## 4. Изменить схему БД
 
-**Нет Alembic — миграции вручную.** При первой возможности — внедрить Alembic (см. ревью).
+**Alembic** (см. [ADR-0003](../architecture/decisions/0003-alembic-for-db-migrations.md) — заменил ручной `ALTER TABLE`-процесс из ранних версий этой доки).
 
 1. Изменить `database/models.py`.
-2. Подготовить SQL: `ALTER TABLE … ADD COLUMN …` или `CREATE TABLE …`.
-3. **С согласия пользователя** запустить:
-   ```bash
-   ssh root@116.203.213.137 "docker exec healthvault_postgres psql -U healthvault -d healthvault -c '<SQL>'"
-   ```
-4. Обновить `03_database_schema.md` (полная инвентаризация полей + anti-patterns).
-5. Обновить `database/crud.py` — функции для нового поля.
-6. AI_CHANGELOG.
+2. Написать миграцию в `database/alembic/versions/` (короткое slug-имя вроде существующих `nlplan01_add_nutrition_log_status.py`, `pat0token01_add_personal_access_tokens.py` — не автогенерированный хэш).
+3. Прогнать alembic-check локально — он ловит расхождение ORM ↔ схема (например, лишний `UniqueConstraint`, см. комментарий у `PersonalAccessToken.token` в `models.py` — почему там сознательно НЕ `unique=True` на уровне колонки).
+4. **С согласия пользователя** применить на сервере (как правило — часть того же деплоя, что и код; миграция должна выполняться **после**, не до, выката образа — прецедент 21.08: миграция против старого образа была тихим no-op).
+5. Обновить `03_database_schema.md` (полная инвентаризация полей + anti-patterns).
+6. Обновить `database/crud.py` — функции для нового поля.
+7. AI_CHANGELOG.
 
 **Если меняешь существующее поле / удаляешь** — backfill-скрипт обязателен. Шаблон: `scripts/backfill_fiber_all_history.py` (идемпотентный, dry-run support).
 
@@ -103,7 +101,7 @@ LLM-роутинг живёт в `core/llm/router.py` (главный classifier
 
 ## 5. Добавить экран / фичу в мини-аппе
 
-Архитектура мини-аппа: 3 таба (Дневник / Добавки / Настройки), один HTML-файл `telegram-bot/webapp/index.html`. Inline `<style>` и inline `<script>` для всего кроме Дневника (он в `day.js`).
+Архитектура мини-аппа: **4 таба** (Дневник / Добавки / **Здоровье** / Настройки), один HTML-файл `telegram-bot/webapp/index.html`. Таб «Здоровье» (`dashboard.js`) — просто iframe на публичный персональный дашборд `GET /mc/{token}`, отдельного backend-эндпоинта не имеет. Inline `<style>`/`<script>` для Settings; Дневник — `day.js`, Настройки — `settings.js`.
 
 **Шаги:**
 1. **Backend:** добавить endpoint в `nutrition_api.py` или `supplements_api.py` (или новый router-файл и подключить в `apple_health.py`).
@@ -141,20 +139,23 @@ ls -t data/backups/healthvault_backup_*.sql | tail -n +8 | xargs rm -f
 ## 7. Прогнать тесты
 
 ```bash
-# Полный набор (быстро, ~2 сек)
-./venv/bin/python3 -m pytest tests/ --ignore=tests/test_live_llm.py -q
+# Полный набор unit-тестов (integration и live LLM исключены по умолчанию)
+PYTHONPATH=. pytest tests/ -v \
+  --ignore=tests/integration \
+  --ignore=tests/test_nutrition_parsing.py
 
-# С вербозом (видно каждый тест)
-./venv/bin/python3 -m pytest tests/ --ignore=tests/test_live_llm.py -v
+# Один файл / один тест
+PYTHONPATH=. pytest tests/test_nutrition_logic.py -v
+PYTHONPATH=. pytest tests/test_plan_prefix.py::test_plan_colon -v
 
-# Один файл
-./venv/bin/python3 -m pytest tests/test_fiber_enrichment.py -v
+# Integration-тесты (RLS, onboarding wizard, Telegram router, audit trail) — отдельно, требуют реального Postgres
+PYTHONPATH=. pytest tests/integration/ -v
 
-# Live LLM тесты (стоят токены — запускать осознанно)
-./venv/bin/python3 -m pytest tests/test_live_llm.py -v
+# Live LLM / nutrition parsing тесты (стоят токены — запускать осознанно)
+PYTHONPATH=. pytest tests/test_nutrition_parsing.py -v
 ```
 
-Текущее состояние: **307 тестов**, все зелёные. 4 deselected — live LLM. **`handlers/photo.py` (1217 LOC) не покрыт ничем** — самое слабое место (см. ревью пункт #10).
+Env-переменные для юнит-тестов не нужны: dummy-ключи ставит `tests/conftest.py` (`setdefault` + autouse-фикстура, защищающая от реальных LLM-вызовов за деньги); `DATABASE_URL` не нужна — `conftest.py` создаёт in-memory SQLite. Integration-тесты (`tests/integration/test_rls_isolation.py` и др.) реально бьют по RLS-политикам Postgres — им нужна настоящая БД.
 
 ---
 
@@ -219,7 +220,7 @@ ls -t data/backups/healthvault_backup_*.sql | tail -n +8 | xargs rm -f
 2. **Состояние БД:** SQL probe (см. `03_database_schema.md` сниппеты)
 3. **Лог Telegram:** в боте есть `debug_logger` — пишет в файл, проверять `data/logs/`
 4. **Network к API:** `curl -sk -H 'Authorization: tma x' …` чтобы увидеть статус
-5. **Если фронт мини-аппа не обновляется** — проверить хеш в HTML: `curl -sk https://health.orangegate.cc/webapp/ | grep day.js`. Хеш должен меняться при изменении JS/CSS.
+5. **Если фронт мини-аппа не обновляется** — проверить хеш в HTML: `curl -sk https://botkin.health/webapp/ | grep day.js`. Хеш должен меняться при изменении JS/CSS.
 
 ---
 
@@ -235,26 +236,81 @@ ls -t data/backups/healthvault_backup_*.sql | tail -n +8 | xargs rm -f
 
 ## 13. Загрузил новый анализ в `knowledge_base.json` — что синкать на сервер
 
-Самый частый workflow для биомаркеров. Источник истины — `~/FamilyHealth/<Имя>/knowledge_base.json` на маке; на сервере читается из **трёх** мест (`02_data_sources.md`, секция 16). Если синкать только одно — увидишь рассогласование (дашборд знает, агент нет — или наоборот).
+Самый частый workflow для биомаркеров. Источник истины — `~/FamilyHealth/<Имя>/knowledge_base.json` на маке; на сервере биомаркеры живут в **двух** местах (`02_data_sources.md`, секция 16), и канонизация ключей происходит на чтении. Если синкать только одно — увидишь рассогласование (дашборд знает, агент нет — или наоборот).
 
-**Для Александра (одна команда):**
+**Одна команда для ЛЮБОГО юзера:**
 ```bash
-python3 scripts/generate_biomarkers_json.py --deploy
+python3 scripts/sync_user_health.py --user <telegram_id> --apply
+# или для всех сразу:
+python3 scripts/sync_user_health.py --all --apply
 ```
-Делает 3 стадии: (1) flat-JSON для дашборда → scp+docker cp, (2) `kb_to_blood_tests.py` → PostgreSQL `blood_tests`, (3) `sync_family_kb.py` → `/app/data/kb/kb_895655.json`.
+Две идемпотентные стадии: (1) KB → bind-mount `kb_<id>.json` (для агентских `/kb_value`, `/list_kb_keys`), (2) KB → Postgres `blood_tests` (для дашборда и `/recent_biomarkers`/`/phenoage`). Маппинг `telegram_id → папка` — единый `config/users.py::KB_USERS`.
 
-**Для других юзеров** (Папа/Андрей/Олег/Игорь — пока без авто-обёртки):
-```bash
-python3 scripts/sync_family_kb.py --user <telegram_id> --apply
-python3 scripts/import/kb_to_blood_tests.py --user-id <telegram_id> --folder "<имя папки>"
-```
+⚠️ `sync_user_health.py` льёт из **локального** KB на маке. Если на сервере данные богаче локального (например, юзер сам догрузил анализ через `/doc`, см. `02_data_sources.md` §17) — сперва свести руками, иначе перезатрёшь более свежие серверные данные локальными.
 
 **Проверка после синка:**
 - Дашборд: открыть `https://botkin.health/mc/<share_token>` → раздел Биомаркеры → смотреть свежую дату
 - Агент: написать боту «какие анализы за <месяц>?» — должен вернуть свежую запись
 - PostgreSQL: `psql -c "SELECT test_date FROM blood_tests WHERE user_id=<id> ORDER BY test_date DESC LIMIT 3"`
 
-**Прецедент 24.05.2026:** обновили только flat-JSON, забыли (2) и (3) → дашборд показывал май, агент утверждал «последний 19 марта». С тех пор автомат `--deploy` закрывает все 3 канала для Александра.
+**Если добавили новую запись в KB — не забыть регенерировать журнал обследований:**
+```bash
+python3 scripts/generate_exam_journal.py "Имя — Здоровье" --update-profile
+```
+
+---
+
+## 14. Добавить/изменить agent tool (BotkinClaw + MCP-коннектор)
+
+Инструменты агента живут в **двух синхронизируемых вручную местах** — нет codegen, связывающего их.
+
+1. **Backend-эндпоинт**: добавить в `telegram-bot/webhook/agent_tools_api.py` — Pydantic `BaseModel` для запроса, `Depends(get_agent_user)` для чтения или `Depends(require_agent_scope("rw"))` для записи. Импорты `database.crud`/`core.*` — внутри функции (избегает циклических импортов, этому следуют все существующие эндпоинты). Никогда не доверять `user_id` из тела запроса — брать `user.telegram_id` из разрешённого JWT.
+2. **Схема инструмента**: добавить запись в константу `TOOLS` в `core/agent_chat.py` (JSON Schema для Claude — имя, описание, параметры).
+3. **Диспетчинг**: добавить ветку в `_call_tool()` (тот же файл) — маппинг имени инструмента на HTTP-вызов к эндпоинту из шага 1.
+4. **Прогресс-индикатор** (опционально): короткая строка в `_TOOL_PROGRESS_LABEL` («🍽 собираю питание» и т.п.) — показывается в Telegram пока агент работает.
+5. **Права**: если инструмент только для админов (как `list_feedback`/`triage_feedback`) — фильтровать из списка `TOOLS` по `config.users.is_admin`, а не через JWT-scope (это отдельная ось прав от `ro`/`rw`).
+6. **Тест**: e2e через `ask_agent(uid, query)` — см. `feedback_e2e_means_ask_agent` в памяти проекта; HTTP-пинг эндпоинта отдельно НЕ проверяет, что агент реально вызывает инструмент правильно.
+7. **MCP-коннектор** получает тот же эндпоинт бесплатно через generic `botkin_api(method, path, params)` в `scripts/mcp/botkin_pat_mcp.py` — отдельный named-tool там нужен только для часто используемых операций (см. текущий список: `get_day_summary`, `get_recent_meals`, `log_meal_text`, и т.п.).
+8. Обновить `01_architecture.md` (список инструментов) и `AI_CHANGELOG.md`.
+
+**Anti-pattern:** забыть один из шагов 1-3 — агент либо получит 404 от несуществующего эндпоинта, либо не будет знать, что инструмент существует, либо не сможет его вызвать. Все три места независимы, компилятор не поймает рассинхрон.
+
+---
+
+## 15. Подключить MCP-коннектор (Claude Desktop) — со стороны пользователя
+
+1. В боте: `/connect_mcp [опциональное имя]` → выбрать scope («🖊 Полный доступ» = `rw` или «👁 Только чтение» = `ro`).
+2. Бот один раз показывает PAT-токен (`pat_<telegram_id>_<hex32>`) — сохранить его, повторно не покажет.
+3. Установить MCP-бандл (`scripts/mcp/manifest.json`, entry point `botkin_pat_mcp.py`) в Claude Desktop, вставить PAT в `user_config.pat` (хранится в системном keychain, не в открытом виде).
+4. Проверка: спросить личного Claude что-то про данные из Botkin (например «какой у меня был вес на этой неделе») — должен вызвать `botkin_api`/`get_weight_history`.
+5. **Отозвать доступ**: `/my_connections` в боте → «❌ Отозвать» у нужного токена (soft-delete через `revoked_at`; уже выданные JWT ещё поработают до истечения своего ~5-минутного TTL).
+
+Дизайн — [ADR-0006](../architecture/decisions/0006-mcp-connector-pat-jwt.md).
+
+---
+
+## 16. Подключить CGM (глюкозу, `/connect_cgm`)
+
+1. `/connect_cgm` в боте → бот спрашивает регион.
+2. **Регион EU**: пригласить `dr@botkin.health` как follower в приложении FreeStyle LibreLink → бот сам находит новый `patient_id` (поллинг до 10 мин) и связывает с `telegram_id`.
+3. **Другой регион** (#381, обязательно — LibreLinkUp-приглашения работают только внутри одного региона Abbott): создать отдельный follower-аккаунт под свой регион, ввести email/пароль в бота. Пароль удаляется из истории чата немедленно, логин валидируется live ДО сохранения кредов.
+4. Ночной cron (`scripts/import/librelinkup.py` через `scripts/server/sync_all.sh`) подтягивает точки глюкозы для всех подключённых пользователей.
+5. **Диагностика проблем с login**: rate-limit 5 попыток/15 мин на пользователя — специально чтобы не словить Cloudflare 476 бан всего региона у Abbott. Если словили — ждать, не долбить повторными попытками.
+
+Подробности — `02_data_sources.md` §16b, [ADR-0005](../architecture/decisions/0005-cgm-librelinkup-integration.md).
+
+---
+
+## 17. Режим план→факт (внести еду авансом)
+
+Пользователь пишет «План: 3 яйца, творог 200г» до того, как поел — распознаётся `core/food/plan_prefix.py`, тот же confirm-flow, но `status='plan'` в `nutrition_log` (эмодзи 📋). План уже входит в итог дня.
+
+**Закрытие плана — три пути:**
+1. **Вечернее авто-напоминание** (`scripts/server/send_reminders.py::dispatch_plan_close`, cron вне aiogram) — присылает вопрос «доеден целиком?» всем с открытыми планами. «Да, всё» массово переключает `status='eaten'`.
+2. **Через агента**: пользователь пишет «съела не всё, минус творог» → BotkinClaw вызывает `adjust_meal_items` (dry-run превью → подтверждение → применение), может закрыть план (`close_plan=True`) или оставить остаток новым планом.
+3. **В мини-аппе**: правка веса/удаление item'а напрямую в Дневнике.
+
+**Если меняешь эту логику** — прогнать `tests/test_plan_prefix.py`, `tests/test_nutrition_plan_crud.py`, `tests/test_plan_close.py`, `tests/test_agent_dispatch_plan.py`. Готча из прецедента 06.09.2026: любая валидация нового веса должна проверять `math.isfinite() and >= 0` (NaN/отрицательные значения могут тихо испортить запись); при массовом обновлении из cron-скрипта коммитить **после каждого пользователя**, не одним махом в конце — иначе ошибка на одном пользователе откатывает уже обработанных.
 
 ---
 

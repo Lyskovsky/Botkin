@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Botkin — MCP для твоего AI</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="icon" type="image/png" href="assets/favicon.png">
+<style>
+:root {
+  --bg: #0a0e17; --bg2: #0f1420; --card: #141a28; --border: #1f2940;
+  --text: #e8eef7; --muted: #7a879f; --g: #00ff9d;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body {
+  background: var(--bg); color: var(--text);
+  font: 16px/1.7 'SF Pro Display','Inter',-apple-system,sans-serif;
+  -webkit-font-smoothing: antialiased;
+  background-image:
+    radial-gradient(circle at 15% 0%, rgba(0,255,157,0.04) 0%, transparent 40%),
+    radial-gradient(circle at 85% 100%, rgba(168,85,247,0.04) 0%, transparent 40%);
+}
+.container { max-width: 760px; margin: 0 auto; padding: 48px 24px 120px; }
+nav { padding: 14px 0; border-bottom: 1px solid var(--border); background: rgba(10,14,23,0.85); backdrop-filter: blur(16px); position: sticky; top: 0; z-index: 10; }
+nav .row { max-width: 760px; margin: 0 auto; padding: 0 24px; display: flex; justify-content: space-between; align-items: center; }
+nav a { color: var(--muted); text-decoration: none; font-size: 14px; }
+nav a:hover { color: var(--text); }
+nav .brand { color: var(--text); font-weight: 700; }
+nav .brand .dot { color: var(--g); }
+h1 { font-size: 32px; line-height: 1.2; margin-bottom: 8px; letter-spacing: -0.5px; }
+h2 { font-size: 20px; margin-top: 40px; margin-bottom: 12px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+.lead { color: var(--muted); font-size: 16px; margin-bottom: 24px; }
+p { margin-bottom: 14px; color: var(--text); }
+ul, ol { margin: 0 0 14px 22px; }
+li { margin-bottom: 6px; }
+code { background: var(--card); padding: 2px 6px; border-radius: 4px; font-family: 'SF Mono',Menlo,monospace; font-size: 0.92em; color: var(--g); }
+pre { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; margin: 0 0 14px; overflow-x: auto; }
+pre code { background: none; padding: 0; color: var(--text); }
+.example { background: var(--card); border-left: 3px solid var(--g); padding: 10px 14px; margin: 10px 0; border-radius: 4px; font-size: 14px; color: var(--muted); }
+.example b { color: var(--text); }
+a { color: var(--g); }
+.footer { margin-top: 60px; padding-top: 20px; border-top: 1px solid var(--border); color: var(--muted); font-size: 13px; }
+</style>
+</head>
+<body>
+<nav>
+  <div class="row">
+    <a class="brand" href="/">Botkin<span class="dot">.</span></a>
+    <a href="https://t.me/Botkin_md_bot">@Botkin_md_bot</a>
+  </div>
+</nav>
+
+<div class="container">
+
+<h1>Botkin MCP — твой личный AI видит твои данные</h1>
+<p class="lead">Для тех, у кого есть любой MCP-совместимый AI (Claude Desktop, или другой клиент, поддерживающий MCP): подключаешь коннектор — и AI в любом чате видит твои данные из Botkin, а не общие слова.</p>
+
+<h2>Что это</h2>
+<p><a href="https://modelcontextprotocol.io" target="_blank" rel="noopener">MCP (Model Context Protocol)</a> — открытый стандарт, по которому AI-приложение подключается к внешним источникам данных. Поддерживают его не только Claude Desktop — ниже описан путь через него (готовый однокликовый коннектор), но сам протокол открытый, и способ «вручную» ниже работает в любом MCP-клиенте. Botkin MCP — наш коннектор, он отдаёт AI:</p>
+<ul>
+  <li>питание за любой период (КБЖУ, продукты, калории)</li>
+  <li>вес, % жира, давление, биомаркеры</li>
+  <li>тренировки и активность</li>
+  <li>журнал добавок и лекарств</li>
+</ul>
+<p><b>Приватные файлы</b> (КПТ-дневник, сканы анализов, которые ты не грузил в Botkin, файлы медприборов) коннектор не трогает вообще — для них в Claude Desktop есть свой встроенный Filesystem-коннектор. Claude видит оба источника разом, поэтому и получается гибридная приватность: серверное — через Botkin, личное — мимо него.</p>
+
+<h2>Что с этим можно делать</h2>
+<div class="example">
+  «какие у меня тренды веса за последний месяц?»<br>
+  «что я ел вчера, посчитай средний КБЖУ за неделю»<br>
+  «запиши что я съел омлет с тостом на 450 ккал»<br>
+  «посмотри давление за 2 недели — есть паттерн?»<br>
+  «прочитай мой КПТ-дневник и сравни с днями, когда я ел больше нормы»
+</div>
+<p>Последний пример — вся суть: Botkin MCP видит «2800 ккал 18 мая», Filesystem-коннектор видит личную запись за то же число — и Claude сопоставляет их сам, а дневник при этом никуда на сервер не уходит.</p>
+
+<h2>Как подключить через Claude Desktop</h2>
+<p><b>Шаг 1 — получи токен в боте.</b> В чате с <a href="https://t.me/Botkin_md_bot">@Botkin_md_bot</a> напиши <code>/connect_mcp</code>. Бот спросит, какой доступ нужен: полный (чтение и запись — для своего личного AI) или только чтение (можно отдать врачу или ещё кому-то — он увидит данные, но не сможет ничего изменить). Выдаст токен вида <code>pat_...</code> — это личный ключ, не публикуй его. Управлять токенами (посмотреть, отозвать) — командой <code>/my_connections</code>.</p>
+<p><b>Шаг 2 — скачай коннектор.</b> Файл <code>botkin-connector.mcpb</code> — в <a href="https://github.com/botkin-health/Botkin/releases">Releases репозитория</a> или спроси у Александра.</p>
+<p><b>Шаг 3 — установи в Claude Desktop.</b> Settings → Extensions → «Install extension» → выбери скачанный <code>.mcpb</code>. Вставь токен из шага 1 в поле «Токен Botkin». Поле «Сервер API» не трогай — там уже правильный адрес.</p>
+<p><b>Шаг 4 — проверь.</b> В новом чате напиши «покажи мой профиль из Botkin» — AI ответит твоими реальными данными.</p>
+
+<h2>Другой MCP-клиент или .mcpb недоступен — вручную</h2>
+<p>Токен из <code>/connect_mcp</code> (см. выше) добавляется обычным <code>mcpServers</code>-конфигом — этот способ работает в любом MCP-клиенте, который его поддерживает, не только в Claude Desktop. Для Claude Desktop конфиг лежит в <code>claude_desktop_config.json</code> (macOS: <code>~/Library/Application Support/Claude/claude_desktop_config.json</code>, Windows: <code>%APPDATA%\Claude\claude_desktop_config.json</code>) — открой и добавь:</p>
+<pre><code>{
+  "mcpServers": {
+    "botkin": {
+      "command": "python",
+      "args": ["/путь/к/scripts/mcp/botkin_pat_mcp.py"],
+      "env": {
+        "BOTKIN_PAT": "твой-токен-из-/connect_mcp",
+        "BOTKIN_API_BASE": "https://botkin.health"
+      }
+    }
+  }
+}</code></pre>
+<p>Нужен Python 3.11+ и <code>pip install mcp requests</code>. После сохранения — полностью выйди из Claude Desktop (Cmd+Q) и открой заново.</p>
+
+<h2>Если что-то не работает</h2>
+<ul>
+  <li>Claude не видит инструменты Botkin — не перезапустил приложение целиком (Cmd+Q, не просто закрыть окно).</li>
+  <li>«PAT недействителен» — токен отозван или неверный. Выпусти новый: <code>/connect_mcp</code>.</li>
+  <li>«Токен только для чтения» — просишь что-то записать, а токен ro. Выпусти rw-токен.</li>
+  <li>Хочешь поделиться данными с врачом — <code>/connect_mcp</code> → «только чтение» → отдай строку токена.</li>
+  <li>Боишься, что токен утёк — <code>/my_connections</code> → отозвать. Старый перестаёт работать сразу.</li>
+</ul>
+<p>Каждый токен видит данные только одного пользователя — на уровне базы данных, а не только в коде. rw-токен — для себя, ro — для тех, кому просто показываешь.</p>
+
+<div class="footer">
+  Botkin v0.5.0 · AGPL-3.0 · <a href="https://github.com/botkin-health/Botkin">GitHub</a> · <a href="user_guide.html">Гайд по боту</a> · <a href="/">на главную</a>
+</div>
+
+</div>
+</body>
+</html>

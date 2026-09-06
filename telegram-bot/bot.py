@@ -435,21 +435,31 @@ async def main():
     # (или первого деплоя) Telegram не знает куда слать апдейты — сообщения
     # копятся в очереди и бот «молчит». Прецедент: 12.05.2026 при свитче
     # @HealthVault_bot → @Botkin_md_bot webhook не зарегистрировали вручную.
-    # Default — legacy-домен: прод-.env не задаёт TELEGRAM_WEBHOOK_URL, а nginx
-    # botkin.health не проксирует /telegram/ (проверено 11.06.2026). Перевод на
-    # botkin.health — только вместе с nginx-location и сменой webhook у Telegram.
     # Дев-стенд без публичного TLS-эндпойнта: Telegram-апдейты тянем polling'ом,
     # но FastAPI-сервер (/health, дашборд, /api/agent) ВСЁ РАВНО поднимаем —
     # поэтому отключаем только webhook-регистрацию, а не сервер целиком.
     # Включается переменной BOTKIN_FORCE_POLLING=1 (см. docker-compose.dev.yml).
     force_polling = os.getenv("BOTKIN_FORCE_POLLING") == "1"
 
-    webhook_url = os.getenv("TELEGRAM_WEBHOOK_URL", "https://health.orangegate.cc/telegram/webhook")
+    # Дефолт переведён на botkin.health (#387, вывод legacy-домена orangegate).
+    # Переезд состоялся: nginx на botkin.health отдаёт /telegram/webhook, прод
+    # держит TELEGRAM_WEBHOOK_URL=https://botkin.health/telegram/webhook явно в .env.
+    webhook_url = os.getenv("TELEGRAM_WEBHOOK_URL", "https://botkin.health/telegram/webhook")
     if webhook_enabled and not force_polling and webhook_url:
         try:
             info = await bot.get_webhook_info()
             if info.url != webhook_url:
-                await bot.set_webhook(url=webhook_url, allowed_updates=["message", "callback_query"])
+                # secret_token ОБЯЗАТЕЛЕН: без него set_webhook сбрасывает секрет на
+                # стороне Telegram, а /telegram/webhook продолжает требовать
+                # TELEGRAM_WEBHOOK_SECRET → все апдейты получают 403 "Invalid webhook
+                # secret". Прецедент #387 (24.08.2026): смена URL при выводе
+                # health.orangegate.cc уронила приём сообщений на ~2 минуты, пока не
+                # переустановили webhook вручную через Telegram API с secret_token.
+                await bot.set_webhook(
+                    url=webhook_url,
+                    secret_token=os.getenv("TELEGRAM_WEBHOOK_SECRET") or None,
+                    allowed_updates=["message", "callback_query"],
+                )
                 logger.info(f"✅ Webhook зарегистрирован: {webhook_url}")
             else:
                 logger.info(f"✅ Webhook уже актуален: {webhook_url}")

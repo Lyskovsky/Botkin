@@ -27,7 +27,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from botkin_client import BotkinClient  # noqa: E402
 
-BASE_URL = os.getenv("BOTKIN_API_BASE", "https://health.orangegate.cc")
+BASE_URL = os.getenv("BOTKIN_API_BASE", "https://botkin.health")
 PAT = os.getenv("BOTKIN_PAT", "")
 
 mcp = FastMCP("Botkin")
