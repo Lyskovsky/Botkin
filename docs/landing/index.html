@@ -360,7 +360,7 @@ footer .bottom {
     <a href="#" class="brand">Botkin<span class="dot">.</span></a>
     <div class="links">
       <a href="#what">Что это</a>
-      <a href="#story">Про автора</a>
+      <a href="#story">Об авторах</a>
       <a href="#how">Как работает</a>
       <a href="#cloud">Облако</a>
       <a href="#docs">Документация</a>
@@ -448,7 +448,7 @@ footer .bottom {
     <div class="feature">
       <div class="icon">📂</div>
       <h3>Knowledge Base</h3>
-      <p>PDF анализов и заключения врачей структурируются в JSON. История биомаркеров за годы — на одном экране.</p>
+      <p>Сфоткал или загрузил PDF анализа прямо в чат — Боткин сам вытащит показатели и разложит по датам. История биомаркеров и заключений врачей за годы — на одном экране.</p>
     </div>
   </div>
 </div>
@@ -457,7 +457,7 @@ footer .bottom {
 <!-- ═══════════ PERSONAL STORY ═══════════ -->
 <section id="story" class="story">
 <div class="container">
-  <div class="eyebrow">Об авторе</div>
+  <div class="eyebrow">Об авторах</div>
   <h2>Александр Лысковский</h2>
 
   <div class="row">
@@ -489,6 +489,13 @@ footer .bottom {
         У каждого пользователя свой ассистент, свой набор анализов, своя приватность.
       </p>
 
+      <p>
+        Делаю Botkin вместе с сыновьями — Олегом и Игорем. Они пишут код, разбираются
+        в архитектуре и чинят баги наравне со мной. А заодно нарабатывают то, что сейчас
+        реально спрашивают на собеседованиях: опыт вайбкодинга на живом проекте, а не
+        учебная поделка для галочки.
+      </p>
+
       <p class="muted">
         Открытый код — намеренно. <strong>Форкни репозиторий и разверни свою копию для семьи или клиентов.</strong>
         Если хочешь обсудить применение в клинике, в корпоративной wellness-программе или в исследовании — напиши на <a href="mailto:lyskovsky@gmail.com">lyskovsky@gmail.com</a>.
@@ -517,12 +524,12 @@ footer .bottom {
     <div class="step">
       <span class="num">02</span>
       <h3>Рассказываешь о себе</h3>
-      <p>Поел — сфоткай тарелку или скажи голосом «съел овсянку 80 грамм». Выпил добавку — напиши «принял креатин». Измерил давление — «АД 128/72». Часы, тонометр и весы шлют свои данные сами через Apple Health — обычно ночью, без участия с твоей стороны.</p>
+      <p>Поел — сфоткай тарелку или скажи голосом «съел овсянку 80 грамм». Выпил добавку — напиши «принял креатин». Измерил давление — «АД 128/72». Часы, тонометр, весы и глюкометр шлют свои данные сами — через Apple Health или напрямую, обычно ночью, без твоего участия.</p>
     </div>
     <div class="step">
       <span class="num">03</span>
       <h3>Боткин думает</h3>
-      <p>Он сам разбирается что ты ел и сколько там калорий. Анализы из PDF превращает в нормальную таблицу с цветами. И главное — замечает связи: «после поздних ужинов давление выше», «белка стало меньше на этой неделе», «холестерин ниже чем в прошлом году».</p>
+      <p>Он сам разбирается что ты ел и сколько там калорий. Анализы из PDF превращает в нормальную таблицу с цветами. Если написал заранее «план: овсянка 80 г», вечером спросит, доел ли ты всё — и сам сведёт план с фактом. И главное — замечает связи: «после поздних ужинов давление выше», «белка стало меньше на этой неделе», «холестерин ниже чем в прошлом году».</p>
     </div>
     <div class="step">
       <span class="num">04</span>
@@ -540,8 +547,9 @@ flowchart LR
       direction TB
       U[👤 Сообщения в боте — фото / голос / текст]
       IOS[📱 iPhone · Apple Health<br>агрегирует весы, тонометр, Apple Watch]
-      AND[📱 Android · Health Connect — скоро<br>агрегирует Samsung Health, Mi, Huawei]
+      AND[📱 Android · Health Connect<br>агрегирует Samsung Health, Mi, Huawei]
       WR[⌚ Garmin / Oura / Whoop / Fitbit / Polar]
+      CGM[🩸 Глюкометр — LibreLinkUp<br>непрерывный мониторинг глюкозы]
       GD[📂 Google Drive — PDF анализов, УЗИ,<br>рецепты, заключения врачей]
     end
 
@@ -569,8 +577,9 @@ flowchart LR
 
     U --> B
     IOS --> WH
-    AND -.-> WH
+    AND --> WH
     WR --> SY
+    CGM --> SY
     GD --> EX
 
     B --> DB
@@ -594,10 +603,8 @@ flowchart LR
     classDef storeCls   fill:#1a2234,stroke:#ffb800,color:#e8eef7
     classDef outCls     fill:#1a2234,stroke:#a855f7,color:#e8eef7
     classDef aiCls      fill:#1e1535,stroke:#22d3ee,color:#e8eef7
-    classDef plannedCls fill:#1a2234,stroke:#7a879f,stroke-dasharray:5 5,color:#7a879f
 
-    class U,IOS,WR,GD sourceCls
-    class AND plannedCls
+    class U,IOS,AND,WR,CGM,GD sourceCls
     class B,WH,SY,EX pipeCls
     class BC aiCls
     class DB,KB storeCls
@@ -724,7 +731,7 @@ flowchart LR
     <div class="meta">
       <span class="pill">Python · FastAPI · Postgres</span>
       <span class="pill">AGPL-3.0</span>
-      <span class="pill">Botkin v0.6.1</span>
+      <span class="pill">Botkin v0.5.0</span>
     </div>
     <p style="margin-top:32px; margin-bottom:0; font-size:14px;">
       Проект бесплатный и живёт на энтузиазме. Поддержать можно уже сейчас — поставь
@@ -772,12 +779,11 @@ flowchart LR
       <h3>Telegram-бот</h3>
       <p>Все команды, как пользоваться фото/голосом/текстом, подключение часов и тонометра.</p>
     </a>
-    <div class="feature" style="opacity:.7">
+    <a href="mcp_guide.html" class="feature">
       <div class="icon">🔌</div>
-      <span class="soon">в работе</span>
       <h3>Claude Desktop MCP</h3>
-      <p>Как подключить наш сервер к своему Claude или Gemini.</p>
-    </div>
+      <p>Как подключить наш сервер к своему Claude Desktop — свой личный AI видит твои данные Botkin и локальные файлы разом.</p>
+    </a>
     <div class="feature" style="opacity:.7">
       <div class="icon">🔒</div>
       <span class="soon">в работе</span>
@@ -864,7 +870,7 @@ flowchart LR
 
   <details class="faq-item">
     <summary>Это бесплатно?</summary>
-    <p>Сам сервис — да. Реальные затраты сейчас: сервер ~€5/мес (Hetzner CX22), LLM API <span id="cost-llm">~$2/мес</span> (9 активных юзеров). Дёшево потому что prompt caching экономит 90% input-токенов. Если будет 50+ пользователей и LLM-расходы вырастут — попросим юзеров подключить свой API-ключ от Anthropic/OpenAI (платишь сам напрямую провайдеру) или введём подписку. Сейчас open-source без коммерции (AGPL-3.0).</p>
+    <p>Сам сервис — да. Реальные затраты сейчас: сервер ~€5/мес (Hetzner CX22), LLM API <span id="cost-llm">~$2/мес</span> (<span id="active-users">9</span> активных юзеров). Дёшево потому что prompt caching экономит 90% input-токенов. Если пользователей станет намного больше и LLM-расходы вырастут — попросим юзеров подключить свой API-ключ от Anthropic/OpenAI (платишь сам напрямую провайдеру) или введём подписку. Сейчас open-source без коммерции (AGPL-3.0).</p>
   </details>
 
   <details class="faq-item">
@@ -874,7 +880,7 @@ flowchart LR
 
   <details class="faq-item">
     <summary>Кто видит мои данные?</summary>
-    <p>Ты сам + AI-помощник в боте. Александр как owner — видит агрегированные метрики через админ-дашборд (например, последнюю активность). Подробнее — в <a href="docs/security">разделе «Безопасность»</a>. Приватные дневники можно хранить локально на своём компьютере или в личной папке Google Drive — сервер их не видит вообще.</p>
+    <p>Ты сам + AI-помощник в боте. Александр как owner — видит агрегированные метрики через админ-дашборд (например, последнюю активность), не содержимое твоих записей. Приватные дневники можно хранить локально на своём компьютере или в личной папке Google Drive — сервер их не видит вообще, а через <a href="mcp_guide.html">Botkin MCP</a> с ними может работать только твой личный Claude.</p>
   </details>
 
   <details class="faq-item">
@@ -884,7 +890,27 @@ flowchart LR
 
   <details class="faq-item">
     <summary>У меня Android, что делать?</summary>
-    <p>Бот работает одинаково на iOS и Android — Telegram одинаков. На любой платформе уже сейчас: Garmin, весы Mi / Zepp, тонометр Omron, ручной ввод (фото / голос / текст). В ближайших обновлениях — интеграция с <strong>Google Health Connect</strong>, через который автоматически подтягиваются Samsung Health, Huawei Health, Mi Health и другие Android-приложения здоровья. Apple Health останется iOS-only (он есть только в iOS).</p>
+    <p>Бот работает одинаково на iOS и Android — Telegram одинаков. На любой платформе уже сейчас: Garmin, весы Mi / Zepp, тонометр Omron, ручной ввод (фото / голос / текст). А ещё — <strong>Google Health Connect</strong>: подключил один раз, и дальше автоматически подтягиваются Samsung Health, Huawei Health, Mi Health и другие Android-приложения здоровья. Apple Health остаётся iOS-only — он и в самой Apple есть только на iPhone.</p>
+  </details>
+
+  <details class="faq-item">
+    <summary>У меня непрерывный глюкометр (FreeStyle Libre), это тоже видно?</summary>
+    <p>Да. Через <strong>LibreLinkUp</strong> глюкоза подтягивается сама, без ручного ввода: время в целевом диапазоне за сутки и суточный график — прямо на дашборде. Подключается один раз в настройках профиля, а BotkinClaw в чате видит эти цифры наравне с остальными анализами — можно спросить его про свою глюкозу так же, как про любой другой биомаркер.</p>
+  </details>
+
+  <details class="faq-item">
+    <summary>Чем это лучше MyFitnessPal или Cronometer?</summary>
+    <p>Не лучше в смысле подсчёта калорий — это умеют многие. Разница в масштабе: там дневник еды, здесь одна база для еды, анализов, давления, сна и тренировок сразу — и свой AI-помощник, который видит всё это разом и сопоставляет, а не просто считает БЖУ. Плюс открытый код: ты не привязан к чужому сервису и можешь развернуть свою копию.</p>
+  </details>
+
+  <details class="faq-item">
+    <summary>Работает ли с анализами не из России?</summary>
+    <p>Да. Показатели вытаскивает LLM, а не шаблон под конкретную лабораторию — работает и с ИНВИТРО, Атлас, Гемотест, и с зарубежными бланками на английском или любом другом языке. Просто сфоткай бланк или пришли PDF.</p>
+  </details>
+
+  <details class="faq-item">
+    <summary>Что будет с моими данными, если я захочу уйти?</summary>
+    <p>Сейчас кнопки «удалить всё» в боте ещё нет — напиши <a href="mailto:lyskovsky@gmail.com">lyskovsky@gmail.com</a>, и Александр удалит твои записи из базы вручную. Самообслуживаемое удаление аккаунта в планах, но пока не сделано.</p>
   </details>
 
   <details class="faq-item">
@@ -910,8 +936,8 @@ flowchart LR
     <div class="col">
       <h4>Подключиться</h4>
       <a href="https://t.me/Botkin_md_bot">@Botkin_md_bot</a>
-      <a href="docs/">Документация</a>
-      <a href="docs/mcp-claude-desktop">MCP для Claude / Gemini</a>
+      <a href="user_guide.html">Документация</a>
+      <a href="mcp_guide.html">MCP для Claude / Gemini</a>
     </div>
     <div class="col">
       <h4>Код</h4>
@@ -926,7 +952,7 @@ flowchart LR
   </div>
   <div class="bottom">
     <span>© 2026 Александр Лысковский. AGPL-3.0.</span>
-    <span class="mono">Botkin v0.6.1 · обновлено 30.06.2026</span>
+    <span class="mono">Botkin v0.5.0 · обновлено 06.09.2026</span>
   </div>
 </div>
 </footer>
@@ -947,7 +973,11 @@ fetch('https://health.orangegate.cc/api/public_stats')  // nginx botkin.health �
     }
     if (typeof data.llm_cost_this_month_usd === 'number') {
       const el = document.getElementById('cost-llm');
-      if (el) el.textContent = '~$' + data.llm_cost_this_month_usd.toFixed(2) + ' за май';
+      if (el) el.textContent = '~$' + data.llm_cost_this_month_usd.toFixed(2) + '/мес';
+    }
+    if (typeof data.active_users === 'number') {
+      const el = document.getElementById('active-users');
+      if (el) el.textContent = data.active_users;
     }
   })
   .catch(() => {/* fallback на статику */});

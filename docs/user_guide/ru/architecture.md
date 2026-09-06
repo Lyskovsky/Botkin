@@ -11,7 +11,7 @@ graph TB
         DB[(🗄 Postgres<br/>shared-данные<br/>всех юзеров)]
         MA[📱 Mini-app]
         DSH[📊 Dashboard<br/>health.orangegate.cc/mc/...]
-        MCP[🔌 MCP server<br/>mcp.health.orangegate.cc]
+        MCP[🔌 MCP server<br/>health.orangegate.cc]
         ADM[⚙️ Admin dashboard<br/>health.orangegate.cc/admin/]
         HAE[🍎 Apple Health webhook]
         KB[(📂 Shared KB<br/>Google Drive)]
@@ -27,7 +27,7 @@ graph TB
         WE[⚖️ Mi-весы]
     end
 
-    subgraph "Коллабораторы (только Олег/Ника/Андрей)"
+    subgraph "Пользователи Claude Desktop (self-service, /connect_mcp)"
         CD[💻 Claude Desktop Code]
         LF[📂 Локальные<br/>приватные файлы<br/>(КПТ-дневник)]
     end
@@ -105,7 +105,7 @@ docs/longevity_kb/
   topics/        ← Сон, силовые, Zone 2, голодание, сауна, ...
 ```
 
-Это **открытая база знаний** (нет персональных данных). Доступна в [GitHub репо](https://github.com/Lyskovsky/Botkin). AI-агент любого юзера может ссылаться на эти материалы в ответах.
+Это **открытая база знаний** (нет персональных данных). Доступна в [GitHub репо](https://github.com/botkin-health/Botkin). AI-агент любого юзера может ссылаться на эти материалы в ответах.
 
 ## Три способа общения с системой
 
@@ -122,14 +122,14 @@ docs/longevity_kb/
 - **Добавки** — чек-лист утро/обед/вечер/ночь
 - **Настройки** — твой профиль, цели, список добавок
 
-### 3. Через Claude Desktop (продвинуто, для коллабораторов)
+### 3. Через Claude Desktop (продвинуто, self-service)
 
-У Олега/Ники/Андрея есть Claude Desktop Code. Они прописывают в его конфиге Botkin MCP с personal токеном. После этого в чате с Claude можно:
+Если у тебя есть Claude Desktop — выпускаешь токен командой `/connect_mcp` в боте, устанавливаешь коннектор (подробнее — [MCP](./mcp-claude-desktop.md)). После этого в чате с Claude можно:
 - «какие у меня тренды веса за месяц»
 - «что я ел вчера»
 - «дай советы по моим последним анализам»
 
-И параллельно — Claude видит **локальные приватные файлы** (КПТ-дневник Олега, заметки Ники) через filesystem MCP. Сервер их **не видит**, но Claude юзера видит **и сервер, и локалку** — и может дать полноценный ответ.
+И параллельно — Claude видит **локальные приватные файлы** (например, твой КПТ-дневник) через filesystem MCP. Сервер их **не видит**, но твой личный Claude видит **и сервер, и локалку** — и может дать полноценный ответ.
 
 ## Privacy boundary — кто видит что
 
@@ -152,12 +152,12 @@ docs/longevity_kb/
 | Dashboard | Python jinja → HTML, Chart.js |
 | MCP server | Python FastMCP |
 | База | PostgreSQL 15 в Docker |
-| LLM | Anthropic Claude Sonnet 4 (parsing + conversational) + OpenAI Whisper (голос) |
-| Сервер | Hetzner CCX13 (Berlin), Docker Compose, Caddy reverse proxy |
+| LLM | Anthropic Claude Sonnet 5 (BotkinClaw, диалог) + Claude Sonnet 4.6 (парсинг еды) + OpenAI/Gemini Vision (фото еды) + OpenAI Whisper (голос) |
+| Сервер | Hetzner CX22 (Berlin), Docker Compose, nginx reverse proxy |
 | Auth | HTTP Basic для admin, Bearer-токены для API/MCP/HAE |
 | KB pipeline | Google Drive Watch API + Claude Vision (OCR PDF/JPEG → JSON) |
 
-Полный код — открытый: [github.com/Lyskovsky/Botkin](https://github.com/Lyskovsky/Botkin).
+Полный код — открытый: [github.com/botkin-health/Botkin](https://github.com/botkin-health/Botkin).
 
 ## Связанные разделы
 

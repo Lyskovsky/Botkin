@@ -33,10 +33,10 @@ to make sense of your body — and your family's bodies — over time:
 
 ### Status
 
-**Alpha.** Started in January 2026, used daily by the founder's family
-(4 active users). We are now opening the codebase under AGPL-3.0 for
-tech-biohackers who want to self-host. A hosted SaaS (`botkin.health/cloud`)
-is planned for Q2–Q3 2026 for users who'd rather not run their own server.
+**Alpha.** Started in January 2026, used daily by the founder's family and
+a growing pilot cohort — 31 active accounts as of September 2026. Codebase is
+open under AGPL-3.0 for tech-biohackers who want to self-host. A hosted SaaS
+tier is on the roadmap once costs or user count justify it — no fixed date yet.
 
 This is **not medical advice software**. Botkin is a personal data tool that
 shows you your own information; for clinical decisions, talk to a real doctor.
@@ -56,8 +56,9 @@ shows you your own information; for clinical decisions, talk to a real doctor.
 ### Support this project
 
 Botkin is built by [Aleksandr Lyskovsky](https://github.com/Lyskovsky) in evenings and
-weekends. If it's useful to you, please consider sponsoring — donations fund
-infrastructure (server, AI tokens) and, eventually, part-time contributors:
+weekends, together with his sons Oleg and Igor — they write code, review PRs, and fix
+bugs right alongside him. If it's useful to you, please consider sponsoring — donations
+fund infrastructure (server, AI tokens) and, eventually, part-time contributors:
 
 - 💖 **GitHub Sponsors** — *coming soon*
 - 🌍 **Open Collective** — *coming soon*
@@ -90,8 +91,11 @@ infrastructure (server, AI tokens) and, eventually, part-time contributors:
   английский тоже; работает с лабораториями ИНВИТРО, Атлас, Гемотест и зарубежными
 
 **Статус:** alpha — проект стартовал в январе 2026, ежедневно используется автором
-и семьёй (4 активных пользователя). Сейчас открываем код для tech-биохакеров под
-AGPL-3.0. Hosted-версия для русскоязычных пользователей без своего сервера — Q2–Q3 2026.
+и семьёй, а вокруг набирается пилотная группа — на сентябрь 2026 это 31 активный
+аккаунт. Пишу его вместе с сыновьями, Олегом и Игорем — они правят код и разбирают
+баги наравне со мной. Сейчас открываем код для tech-биохакеров под AGPL-3.0.
+Hosted-версия — в планах, но без фиксированной даты: запустим, когда расходы или
+число пользователей это оправдают.
 
 > ⚠️ Botkin — это **инструмент для работы с вашими собственными данными**, а не
 > медицинский советник. Для клинических решений — врач.

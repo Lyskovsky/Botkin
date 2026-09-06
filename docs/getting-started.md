@@ -9,7 +9,7 @@
 ### 1.1. Клонировать и встать на рабочую ветку
 
 ```bash
-git clone git@github.com:Lyskovsky/Botkin.git
+git clone git@github.com:botkin-health/Botkin.git
 cd Botkin
 git checkout dev
 ```
@@ -47,7 +47,7 @@ claude plugin list   # проверка: все 4 enabled
 
 | Инструмент | Зачем | Установка |
 |---|---|---|
-| **`gh` CLI** + `gh auth login` | скиллы `to-issues`/`triage`/`to-prd`/`qa` пишут в GitHub Issues (`Lyskovsky/Botkin`) | `brew install gh` |
+| **`gh` CLI** + `gh auth login` | скиллы `to-issues`/`triage`/`to-prd`/`qa` пишут в GitHub Issues (`botkin-health/Botkin`) | `brew install gh` |
 | **Google Chrome** | `chrome-devtools-mcp` (браузерная отладка, скриншоты) | — |
 | **Node.js** | часть плагинов/MCP запускается через npx | `brew install node` |
 

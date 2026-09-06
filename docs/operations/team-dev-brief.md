@@ -10,7 +10,7 @@
 
 | Что | Где |
 |---|---|
-| **Код** | GitHub: `github.com/Lyskovsky/Botkin`, главная ветка — `main` |
+| **Код** | GitHub: `github.com/botkin-health/Botkin`, главная ветка — `main` |
 | **Боевой сервер (прод)** | Hetzner, `116.203.213.137`, папка `/opt/healthvault` |
 | **Бот** | Telegram `@Botkin_md_bot` — крутится в Docker-контейнере `healthvault_bot` |
 | **База данных** | PostgreSQL в контейнере `healthvault_postgres` (питание, вес, давление, биомаркеры, история диалогов). Сейчас ~17 МБ |
