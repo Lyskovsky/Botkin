@@ -44,7 +44,7 @@ CLASSIFICATION CATEGORIES:
 2. "weight": Photos of weight scales, text like "80.5 kg", body composition screens.
 3. "vitamins": Photos of supplement bottles, text like "took omega3", "vitamins done", specific supplements like "Psyllium", "Collagen", "Ashwagandha".
 4. "body_measurements": Records of body size in cm like "waist 101, neck 42.5", "талия 101 см", "рост 171" (height → height_cm).
-5. "medical": Lab results, doctor notes (if clearly medical).
+5. "medical": Lab results, doctor notes, photos of MEDICATION packaging/blister/ampoule/box (if clearly medical, NOT food/supplement packaging — those stay "food"/"vitamins" per SCENARIO 1.2/3).
 6. "other": General chat, questions not related to logging, or unclear inputs.
 
 OUTPUT FORMAT:
@@ -389,16 +389,56 @@ SCENARIO 5: OTHER
   }
 }
 
+SCENARIO 5.1: MEDICAL PHOTO (medication package / blister / ampoule / box — CRITICAL, read the text!)
+When the photo shows a MEDICATION package, box, blister strip, ampoule, or similar pharma packaging
+(NOT food, NOT a supplement/vitamin bottle — those go through SCENARIO 1.2/3 instead):
+
+STEP 1 — READ THE VISIBLE TEXT ON THE PACKAGE (same priority as reading food labels in SCENARIO 1.2):
+  - Trade/brand name as printed (e.g. "Омник", "Аторис")
+  - Active substance / МНН (действующее вещество), if shown
+  - Dosage/strength (e.g. "0.4 мг", "500 mg")
+  - Manufacturer, if shown
+  - Form (таблетки, капсулы, раствор для инъекций, свечи), if shown
+
+STEP 2 — NEVER refuse outright. Even a partial read ("...омник...0.4 мг", name legible but dosage
+blurry) is better than "не удалось распознать". Report exactly what you could read.
+
+STEP 3 — Classify as "medical" (not "other") whenever the photo is clearly a medication package —
+this lets downstream code treat it as a proper vision-read rather than a discarded result.
+
+{
+  "type": "medical",
+  "data": {
+    "reply": "Russian-language summary of what was read from the package: trade name, active substance, dosage, manufacturer, form — whatever is visible. If truly nothing is readable (blurry/cut off), say so explicitly here instead of a generic refusal."
+  }
+}
+Example: photo of a box reading "ОМНИК ОКАС 0,4 мг таблетки пролонгированного действия, №30, Astellas"
+→ {"type": "medical", "data": {"reply": "На фото упаковка «Омник Окас», действующее вещество тамсулозин, дозировка 0.4 мг, таблетки пролонгированного действия №30, производитель Astellas."}}
+
 SCENARIO 7: BP (blood pressure measurement)
 Use when user sends a blood pressure reading — text like "120/80 пульс 70", "АД 130/85", or a photo of a tonometer (Omron, Microlife, etc) showing SYS/DIA/PULSE values on the display.
 Realistic ranges: systolic 70-250, diastolic 40-150, pulse 30-220, systolic > diastolic.
 
+THE CORE TEST — classify as BP ONLY if the numbers are the user's OWN reading THEY JUST TOOK (a measurement that happened, on them, right now/today). If in doubt, do NOT classify as BP — a false measurement silently corrupts the user's medical history and doctor report; a missed one is at least noticed and re-entered. When unsure, prefer SCENARIO 5 (OTHER).
+
 CRITICAL — DO NOT classify as BP if any of these apply:
-- Message is a QUESTION about BP (contains «нужно ли», «можно ли», «опасно ли», «что делать», «что значит», «?», "should I", "is it ok", etc.). Even if BP numbers are mentioned, the user is asking, not logging — use SCENARIO 5 (OTHER) so the agent answers.
 - Message describes a RANGE («давление в интервале 140-120 /85-70», «в диапазоне», «бывает», «иногда», «доходит до», «колеблется») — that's a description for the agent to interpret, not a single measurement.
 - Message is in past tense about past readings («раньше было», «вчера было», «месяц назад») — use OTHER, the agent will look up history.
-Example: «У меня давление 140/90, нужно ли пить таблетки?» → SCENARIO 5 (OTHER), NOT bp.
+- The numbers are NORMATIVE/HYPOTHETICAL/EDUCATIONAL/THIRD-PARTY — i.e. the message asks about a threshold, a rule of thumb, someone else's reading, or "what if" scenario, not the user's own just-taken measurement. Markers: «правда ли, что», «считается нормальным», «при каком давлении», «врач сказал, что при», «если давление», «а если у меня будет», someone else's name + "сказала/сказал, что при". These numbers are illustrative, not a log entry — use OTHER even though the message contains a question mark and BP-shaped numbers.
+
+A QUESTION about a CURRENT/JUST-TAKEN OWN reading (contains «нужно ли», «можно ли», «опасно ли», «что делать», «что значит», «?», "should I", "is it ok", etc.) does NOT by itself disqualify BP — a fresh measurement mentioned alongside a question is still a real reading and MUST be logged as SCENARIO 7 (BP) so it gets saved; the question part is answered separately by the agent (downstream code handles this — you only need to extract the numbers correctly here). But the question mark alone does not make it BP either — apply THE CORE TEST above: is this the user's own fresh reading, or a number used to illustrate a normative/hypothetical question?
+
+Positive example (own fresh reading + question → BP):
+Example: «170/100 пульс 70, это нормально?» → SCENARIO 7 (BP), systolic=170, diastolic=100, pulse=70 (still log it — this is a fresh reading, not history).
 Example: «120/80 пульс 65» → SCENARIO 7 (BP).
+
+Negative examples (range / past tense / normative-hypothetical → OTHER, never BP):
+Example: «У меня давление в диапазоне 140-120/85-70, нужно ли мне пить таблетки?» → SCENARIO 5 (OTHER), NOT bp (this is a RANGE, not a single measurement).
+Example: «Вчера было 150/90, это нормально было?» → SCENARIO 5 (OTHER), NOT bp (past tense — history, not a current log).
+Example: «Правда ли, что 140/90 — это уже гипертония?» → SCENARIO 5 (OTHER), NOT bp (normative question about a threshold, not the user's own reading).
+Example: «Какое давление считается нормальным — 120/80?» → SCENARIO 5 (OTHER), NOT bp (asking about a norm, not reporting a measurement).
+Example: «Таня сказала, при 160/100 надо принимать каптоприл, это так?» → SCENARIO 5 (OTHER), NOT bp (someone else's rule of thumb, not the user's own reading).
+Example: «При каком давлении вызывать скорую, при 180/110?» → SCENARIO 5 (OTHER), NOT bp (hypothetical threshold question, not a measurement taken now).
 {
   "type": "bp",
   "data": {

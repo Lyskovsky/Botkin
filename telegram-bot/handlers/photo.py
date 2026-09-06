@@ -1238,20 +1238,41 @@ async def handle_description(
                 logger.exception("Не удалось авто-архивировать нераспознанное фото (user %s)", user_id)
 
             actual_caption = (caption or "").strip()
-            if actual_caption:
+            # 🐛 FIX (#медфото): раньше здесь БЕЗУСЛОВНО подставлялась фраза
+            # «LLM-vision не распознал…», даже если vision реально прочитала
+            # текст с фото (например, упаковку лекарства — SCENARIO 5.1 в
+            # core/llm/router.py) и положила распознанное в data.reply.
+            # Прецедент: фото упаковки «Омник» с вопросом «есть данные по
+            # препарату?» — router вернул reply с названием/дозировкой, но код
+            # это выбрасывал и говорил агенту, что вообще ничего не увидел.
+            recognized_reply = ""
+            if isinstance(router_result, dict) and isinstance(router_result.get("data"), dict):
+                recognized_reply = (router_result["data"].get("reply") or "").strip()
+
+            if actual_caption or recognized_reply:
                 # Передаём агенту — он умнее stock-message
                 try:
                     from core.agent_chat import ask_agent
                     from core.tg_markdown import md_to_html, split_markdown_for_telegram
                     import asyncio
 
-                    user_text_for_agent = (
+                    caption_line = (
                         f"[Пользователь прислал фото с подписью]: {actual_caption}\n\n"
-                        f"(LLM-vision не распознал на фото еду/вес/добавки/АД/замеры тела. "
-                        f"Это вероятно скриншот приложения, медицинский документ, фото объекта "
-                        f"или вопрос с контекстом. Фото уже сохранено в архив документов профиля — "
-                        f"НЕ предлагай пользователю /doc или другое хранилище, оно уже сохранено. "
-                        f"Разберись через свои tools и ответь по существу.)"
+                        if actual_caption
+                        else "[Пользователь прислал фото без подписи]\n\n"
+                    )
+                    if recognized_reply:
+                        vision_note = f"(Vision прочитала на фото: {recognized_reply})"
+                    else:
+                        vision_note = (
+                            "(LLM-vision не распознал на фото еду/вес/добавки/АД/замеры тела. "
+                            "Это вероятно скриншот приложения, медицинский документ, фото объекта "
+                            "или вопрос с контекстом.)"
+                        )
+                    user_text_for_agent = (
+                        caption_line + vision_note + " Фото уже сохранено в архив документов профиля — "
+                        "НЕ предлагай пользователю /doc или другое хранилище, оно уже сохранено. "
+                        "Разберись через свои tools и ответь по существу."
                     )
 
                     await processing_message.edit_text("🤔 думаю...")
@@ -1277,8 +1298,9 @@ async def handle_description(
                                 else:
                                     await message.answer(chunk)
                     else:
+                        context_snippet = actual_caption[:80] or recognized_reply[:80]
                         await processing_message.edit_text(
-                            "🤔 Понял что прислал фото с подписью «" + actual_caption[:80] + "», "
+                            "🤔 Понял контекст фото («" + context_snippet + "»), "
                             "но не смог сформулировать ответ. Попробуй переформулировать вопрос текстом."
                         )
                     return

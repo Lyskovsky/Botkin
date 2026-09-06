@@ -5,6 +5,7 @@
 
 import re
 import asyncio
+import logging
 from datetime import datetime, timedelta
 
 from core.infra.tz import get_user_tz  # noqa: E402
@@ -18,6 +19,7 @@ from services.state import state_manager
 from services.state_helpers import build_meal_state_data
 
 router = Router()
+logger = logging.getLogger(__name__)
 
 
 _QUESTION_STARTERS = (
@@ -143,6 +145,43 @@ def _inject_bp_to_agent_conv(
             _db.close()
     except Exception as _e:
         pass  # non-critical, never break the main handler
+
+
+async def _bp_confirmation_with_answer(is_question: bool, user_id: int, raw_text: str, confirmation_html: str) -> str:
+    """Собрать финальный HTML-ответ на детерминированно сохранённый замер АД.
+
+    Раньше наличие вопросительного маркера («это нормально?», «нужно ли
+    пить таблетки?») ПОЛНОСТЬЮ отменяло сохранение замера — вся фраза
+    уходила агенту, а числа терялись. Прецедент 04.09.2026: пользователь
+    написал «сегодня 4/9 я записывал в Botkin АД 170/100 пульс 70. У тебя
+    его нет?» — записи действительно не было, пришлось диктовать повторно.
+
+    Теперь замер СНАЧАЛА сохраняется детерминированно (вызывающий код), а
+    этот helper, если сообщение было вопросом, ДОПОЛНИТЕЛЬНО зовёт агента
+    за ответом по существу — не давая ему повторно вызвать log_bp (иначе
+    замер задвоился бы).
+    """
+    if not is_question:
+        return confirmation_html
+
+    try:
+        from core.agent_chat import ask_agent
+        from core.tg_markdown import md_to_html
+
+        agent_prompt = (
+            f"[Пользователь прислал замер давления вместе с вопросом]: {raw_text}\n\n"
+            f"(Замер уже СОХРАНЁН в БД детерминированно — НЕ вызывай log_bp/save_bp "
+            f"повторно, просто ответь на вопрос пользователя по существу.)"
+        )
+        loop = asyncio.get_running_loop()
+        agent_reply = await loop.run_in_executor(None, ask_agent, int(user_id), agent_prompt)
+    except Exception as e:
+        logger.warning(f"BP question follow-up to agent failed: {e}")
+        agent_reply = None
+
+    if agent_reply:
+        return f"{confirmation_html}\n\n{md_to_html(agent_reply)}"
+    return confirmation_html
 
 
 def _is_clearly_conversational(text: str) -> bool:
@@ -664,14 +703,34 @@ async def handle_text_message(message: Message, user_id: int, state: FSMContext)
         "переживать",
     )
     _BP_RANGE_RE = re.compile(r"\d{2,3}\s*-\s*\d{2,3}\s*[/\\]|[/\\]\s*\d{2,3}\s*-\s*\d{2,3}")
+    # Отменяют сохранение ДИАПАЗОН (описание, не единичный замер) и ПРОШЕДШЕЕ
+    # ВРЕМЯ («вчера было», «раньше бывало» — история, не текущий лог).
+    _BP_PAST_MARKERS = (
+        "было",
+        "бывало",
+        "раньше",
+        "назад",
+        "в прошлый раз",
+        "тогда",
+    )
     _lower_text = text.lower()
     _is_bp_question = any(m in _lower_text for m in _BP_QUESTION_MARKERS)
     _is_bp_range = bool(_BP_RANGE_RE.search(text))
-    if _is_bp_question or _is_bp_range:
+    _is_bp_past = any(m in _lower_text for m in _BP_PAST_MARKERS)
+    # 🐛 FIX 06.09.2026: вопрос БОЛЬШЕ НЕ отменяет сохранение целиком (fix
+    # 04.09.2026 от этого отказался), НО регэксп по-прежнему не может отличить
+    # «170/100 пульс 70, это нормально?» (свой свежий замер) от «правда ли,
+    # что 140/90 — это уже гипертония?» (число в отвлечённом/нормативном
+    # вопросе, не замер). Разница нерегэксп-решаемая — поэтому детерминированный
+    # быстрый путь (без LLM) остаётся ТОЛЬКО для однозначного случая без
+    # вопроса («170/100 пульс 70»). Если есть вопросительный маркер — пропускаем
+    # regex pre-check и отдаём решение LLM-роутеру (SCENARIO 7 в core/llm/router.py),
+    # у которого есть контекст, чтобы отличить «свой замер» от «числа в вопросе».
+    if _is_bp_question or _is_bp_range or _is_bp_past:
         debug_logger.info(
             f"🩺 BP regex SKIPPED for user {user_id}: "
-            f"question={_is_bp_question} range={_is_bp_range} — "
-            f"передаём в агент (text head: {text[:80]!r})"
+            f"question={_is_bp_question} range={_is_bp_range} past={_is_bp_past} — "
+            f"передаём в агент/LLM-роутер (text head: {text[:80]!r})"
         )
         bp_match = None
     else:
@@ -713,10 +772,7 @@ async def handle_text_message(message: Message, user_id: int, state: FSMContext)
                 pulse_part = f" пульс {pulse_v}" if pulse_v else ""
                 time_part = f" в {measured_at.strftime('%H:%M')}" if measured_at else ""
                 e2e_prefix = "🧪 [E2E] " if is_e2e else ""
-                await processing_msg.edit_text(
-                    f"{e2e_prefix}🩺 <b>АД:</b> {sys_v}/{dia_v}{pulse_part}{time_part}\n✅ Записано",
-                    parse_mode="HTML",
-                )
+                confirmation_html = f"{e2e_prefix}🩺 <b>АД:</b> {sys_v}/{dia_v}{pulse_part}{time_part}\n✅ Записано"
                 debug_logger.info(f"✅ BP regex pre-check matched: {sys_v}/{dia_v} pulse={pulse_v}")
                 # Inject both turns into agent_conversations so BotkinClaw sees
                 # this save when later asked about BP dynamics (fix: #71).
@@ -729,6 +785,11 @@ async def handle_text_message(message: Message, user_id: int, state: FSMContext)
                     conf_text=f"🩺 АД: {sys_v}/{dia_v}{pulse_part}{time_part}. Записано.",
                     include_user_turn=True,
                 )
+                # Замер сохранён детерминированно ВНЕ ЗАВИСИМОСТИ от того, был ли
+                # это вопрос («…, это нормально?») — вопрос дополнительно уходит
+                # агенту за ответом по существу, без повторного log_bp.
+                final_text = await _bp_confirmation_with_answer(_is_bp_question, int(user_id), text, confirmation_html)
+                await processing_msg.edit_text(final_text, parse_mode="HTML")
                 return
             else:
                 await processing_msg.edit_text(
@@ -1274,13 +1335,17 @@ async def handle_text_message(message: Message, user_id: int, state: FSMContext)
             # pre-check выше не сработал — например необычная формулировка).
             data = router_result.get("data", {})
             sys_v, dia_v, pulse_v = data.get("systolic"), data.get("diastolic"), data.get("pulse")
-            # Тот же guard, что и в regex-пути выше: если сообщение —
-            # вопрос или описание диапазона, не сохраняем замер. Сбрасываем
-            # router_result/msg_type и выпадаем ниже к BotkinClaw.
-            if _is_bp_question or _is_bp_range:
+            # Тот же guard, что и в regex-пути выше: если сообщение — описание
+            # диапазона или прошедшее время, не сохраняем замер. Сбрасываем
+            # router_result/msg_type и выпадаем ниже к BotkinClaw. Вопрос сам
+            # по себе НЕ сбрасывается здесь — если код дошёл до этой ветки,
+            # значит LLM-роутер (SCENARIO 7) уже решил, что это СВОЙ свежий
+            # замер, а не число в отвлечённом/нормативном вопросе, и явно
+            # классифицировал сообщение как "bp" — см. FIX 06.09.2026.
+            if _is_bp_range or _is_bp_past:
                 debug_logger.info(
                     f"🩺 BP LLM-router SKIPPED for user {user_id}: "
-                    f"question={_is_bp_question} range={_is_bp_range} — передаём в агент"
+                    f"range={_is_bp_range} past={_is_bp_past} — передаём в агент"
                 )
                 router_result = None
                 msg_type = None
@@ -1312,10 +1377,7 @@ async def handle_text_message(message: Message, user_id: int, state: FSMContext)
                 time_part = f" в {time_str}" if time_str else ""
                 e2e_prefix = "🧪 [E2E] " if is_e2e else ""
                 status = "✅ Записано" if saved else "⚠️ Ошибка записи"
-                await processing_msg.edit_text(
-                    f"{e2e_prefix}🩺 <b>АД:</b> {sys_v}/{dia_v}{pulse_part}{time_part}\n{status}",
-                    parse_mode="HTML",
-                )
+                confirmation_html = f"{e2e_prefix}🩺 <b>АД:</b> {sys_v}/{dia_v}{pulse_part}{time_part}\n{status}"
                 if saved:
                     # LLM router path: log_router_raw_text already saved the user
                     # turn → inject only the assistant confirmation (#71).
@@ -1325,6 +1387,10 @@ async def handle_text_message(message: Message, user_id: int, state: FSMContext)
                         conf_text=f"🩺 АД: {sys_v}/{dia_v}{pulse_part}{time_part}. Записано.",
                         include_user_turn=False,
                     )
+                    confirmation_html = await _bp_confirmation_with_answer(
+                        _is_bp_question, int(user_id), text, confirmation_html
+                    )
+                await processing_msg.edit_text(confirmation_html, parse_mode="HTML")
                 return
 
         elif msg_type == "body_measurements":
