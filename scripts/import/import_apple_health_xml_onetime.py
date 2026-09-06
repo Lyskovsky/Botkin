@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-Импорт Apple Health XML → PostgreSQL для Ники Селезнёвой (user_id 485132).
+Импорт Apple Health XML → PostgreSQL для одного пользователя (разовый ручной импорт).
 
-Парсит /tmp/nika_health/apple_health_export/export.xml, агрегирует по дням,
-генерирует SQL-файл /tmp/nika_import.sql — потом заливается на сервер через SSH.
+Парсит export.xml, агрегирует по дням, генерирует SQL-файл — потом заливается
+на сервер через SSH. Пути и user_id задаются переменными окружения (см. ниже);
+никаких реальных ФИО/ID в самом скрипте — это PII, ей место в приватном конфиге.
 
 Таблицы:
   - activity_log        (steps, hr, hrv, sleep, distance + raw_data с кольцами/VO2/etc)
@@ -14,8 +15,12 @@
 
 ON CONFLICT DO UPDATE — идемпотентно.
 НЕ трогает других пользователей.
+
+Запуск:
+  IMPORT_USER_ID=<telegram_id> IMPORT_XML=/path/to/export.xml python3 import_nika_apple_health.py
 """
 
+import os
 import defusedxml.ElementTree as ET
 from collections import defaultdict
 from datetime import datetime
@@ -23,9 +28,9 @@ from statistics import mean
 import json
 from pathlib import Path
 
-XML = Path("/tmp/nika_health/apple_health_export/export.xml")
-OUT_SQL = Path("/tmp/nika_import.sql")
-USER_ID = 485132
+XML = Path(os.environ.get("IMPORT_XML", "/tmp/apple_health_import/export.xml"))
+OUT_SQL = Path(os.environ.get("IMPORT_OUT_SQL", "/tmp/apple_health_import.sql"))
+USER_ID = int(os.environ["IMPORT_USER_ID"])
 
 # ── Маппинг HKWorkoutActivityType → читаемое название ────────────────────────
 WORKOUT_TYPE_MAP = {
@@ -550,7 +555,7 @@ def jsonb(d: dict) -> str:
 
 
 lines = [
-    "-- Импорт Apple Health для Ники Селезнёвой (user_id=485132)",
+    f"-- Импорт Apple Health (user_id={USER_ID})",
     f"-- Сгенерировано: {datetime.now().isoformat()}",
     f"-- Дней activity: {len(all_days)}, весов: {len(weight_records)}, BP: {len(bp_pairs)}, "
     f"тренировок: {len(workout_records)}, менструальных: {len(menstrual_records)}",
