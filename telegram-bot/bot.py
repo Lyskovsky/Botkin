@@ -442,9 +442,8 @@ async def main():
     force_polling = os.getenv("BOTKIN_FORCE_POLLING") == "1"
 
     # Дефолт переведён на botkin.health (#387, вывод legacy-домена orangegate).
-    # Реальный переход требует синхронной готовности nginx-location /telegram/webhook
-    # на botkin.health и перерегистрации webhook у Telegram — до этого прод
-    # держит TELEGRAM_WEBHOOK_URL=health.orangegate.cc/telegram/webhook явно в .env.
+    # Переезд состоялся: nginx на botkin.health отдаёт /telegram/webhook, прод
+    # держит TELEGRAM_WEBHOOK_URL=https://botkin.health/telegram/webhook явно в .env.
     webhook_url = os.getenv("TELEGRAM_WEBHOOK_URL", "https://botkin.health/telegram/webhook")
     if webhook_enabled and not force_polling and webhook_url:
         try:
