@@ -1363,6 +1363,14 @@ async def handle_description(
         cal = item.get("calories", 0)
         response += f"• {html.escape(str(item['product']))} ({w_str}) — {int(cal)} ккал\n"
 
+    # #409: если пересчитали КБЖУ по этикетке «на 100 г» — показываем как это получилось
+    label = new_data.get("product_label") or {}
+    if label.get("calories_per_100g") and len(meal_items) == 1 and meal_items[0].get("weight_g"):
+        response += (
+            f"<i>этикетка: {int(label['calories_per_100g'])} ккал/100 г · "
+            f"за {int(meal_items[0]['weight_g'])} г = {int(meal_items[0].get('calories', 0))} ккал</i>\n"
+        )
+
     response += f"\n📊 <b>Итого: {int(meal_totals['calories'])} ккал</b>\n"
     response += f"Б: {int(meal_totals['protein'])} | Ж: {int(meal_totals['fats'])} | У: {int(meal_totals['carbs'])}"
 
@@ -1422,7 +1430,12 @@ def build_router_result_from_menu_data(menu_data: dict, caption: str = "") -> di
 
     return {
         "type": "food",
-        "data": {"dish_name": dish_name, "meal_type": "meal", "items": items},
+        "data": {
+            "dish_name": dish_name,
+            "meal_type": "meal",
+            "items": items,
+            "product_label": menu_data.get("product_label"),
+        },
     }
 
 

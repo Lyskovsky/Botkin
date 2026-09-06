@@ -655,6 +655,13 @@ def process_llm_food_data(llm_data: Dict, description: str = None) -> Tuple[List
 
     data = llm_data.get("data", {})
     items = data.get("items", [])
+
+    # #409: сверяем единственный item с этикеткой «на 100 г» — LLM иногда путает
+    # значения per-100g со значениями на всю упаковку.
+    from .label_consistency import reconcile_items_with_label
+
+    items = reconcile_items_with_label(items, data.get("product_label"))
+
     meal_items = []
 
     # Pre-calculate regex items if description is available
