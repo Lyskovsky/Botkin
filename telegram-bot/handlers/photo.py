@@ -997,6 +997,20 @@ async def save_document_as_image(message: Message, file_id: str, file_name: str 
 # Это нужно, чтобы текстовые сообщения без фото обрабатывались правильно
 
 
+def merge_caption_and_description(caption: str, description: str) -> str:
+    """Склеить подпись к фото и текст описания в один запрос к LLM.
+
+    Голосовой путь (voice.py) кладёт транскрипт и в caption, и в description —
+    тогда без этой проверки текст дублировался («план: суп\nплан: суп»), и
+    префикс «план:» вырезался только из первой копии (#407).
+    """
+    cap = (caption or "").strip()
+    desc = (description or "").strip()
+    if not cap or cap == desc:
+        return desc
+    return f"{cap}\n{desc}".strip()
+
+
 async def handle_description(
     message: Message, description: str = None, processing_message: Message = None, custom_date: str = None
 ):
@@ -1042,7 +1056,7 @@ async def handle_description(
     logger.info(f"🔍 [DEBUG] user_state.data keys: {list(user_state.data.keys())}")
 
     # Объединяем caption и description
-    full_description = f"{caption}\n{description}".strip() if caption else description
+    full_description = merge_caption_and_description(caption, description)
 
     # Извлекаем дату из описания (поддержка "вчера")
     # Если custom_date не был передан, пытаемся извлечь из текста
@@ -1054,6 +1068,13 @@ async def handle_description(
             custom_date = extracted_date
             full_description = clean_description
             logger.info(f"Извлечена дата из описания: {custom_date}, очищенное описание: '{clean_description[:50]}...'")
+
+    # #407: префикс «план:» / «на день:» / «планирую …» — запись вносится
+    # авансом, факт сводится позже. Снимаем ПОСЛЕ извлечения даты, чтобы
+    # "план: вчера ужин ..." парсился как обычно, без слова "план".
+    from core.food.plan_prefix import strip_plan_prefix
+
+    full_description, is_plan = strip_plan_prefix(full_description)
 
     # --- LLM Router Logic ---
     from core.llm.router import analyze_message
@@ -1372,6 +1393,7 @@ async def handle_description(
         product_label=(router_result.get("data") or {}).get("product_label")
         or (menu_data or {}).get("product_label")
         or user_state.data.get("product_label"),
+        is_plan=is_plan or None,
     )
     user_state = UserState(user_id=user_id, state="waiting_confirmation", data=new_data)
     state_manager.set_state(user_id, user_state)
@@ -1379,11 +1401,22 @@ async def handle_description(
     # Формируем ответ
 
     # Экранируем названия из vision/LLM/подписи перед вставкой в HTML (issue #115, anti-XSS).
-    response = f"🍽️ <b>{html.escape(str(meal_name))}</b>\n\n"
+    if is_plan:
+        response = f"📋 <b>План: {html.escape(str(meal_name))}</b>\n\n"
+    else:
+        response = f"🍽️ <b>{html.escape(str(meal_name))}</b>\n\n"
     for item in meal_items:
         w_str = f"{item['weight_g']}г" if item.get("weight_g") else "?"
         cal = item.get("calories", 0)
         response += f"• {html.escape(str(item['product']))} ({w_str}) — {int(cal)} ккал\n"
+
+    # #409: если пересчитали КБЖУ по этикетке «на 100 г» — показываем как это получилось
+    label = new_data.get("product_label") or {}
+    if label.get("calories_per_100g") and len(meal_items) == 1 and meal_items[0].get("weight_g"):
+        response += (
+            f"<i>этикетка: {int(label['calories_per_100g'])} ккал/100 г · "
+            f"за {int(meal_items[0]['weight_g'])} г = {int(meal_items[0].get('calories', 0))} ккал</i>\n"
+        )
 
     response += f"\n📊 <b>Итого: {int(meal_totals['calories'])} ккал</b>\n"
     response += f"Б: {int(meal_totals['protein'])} | Ж: {int(meal_totals['fats'])} | У: {int(meal_totals['carbs'])}"
@@ -1444,7 +1477,12 @@ def build_router_result_from_menu_data(menu_data: dict, caption: str = "") -> di
 
     return {
         "type": "food",
-        "data": {"dish_name": dish_name, "meal_type": "meal", "items": items},
+        "data": {
+            "dish_name": dish_name,
+            "meal_type": "meal",
+            "items": items,
+            "product_label": menu_data.get("product_label"),
+        },
     }
 
 
@@ -1740,13 +1778,24 @@ async def handle_meal_confirmation(callback: CallbackQuery, callback_data: MealC
                 _db.close()
             budget = format_budget_line(telegram_user_id, for_date=meal_date, show_bar=_show_bar)
 
+            is_plan = bool(user_state.data.get("is_plan"))
+            confirm_first_line = (
+                f"📋 <b>План: {meal_name}</b> · {meal_kcal:.0f} ккал\n"
+                if is_plan
+                else f"✅ <b>{meal_name}</b> · {meal_kcal:.0f} ккал\n"
+            )
             confirm_text = (
-                f"✅ <b>{meal_name}</b> · {meal_kcal:.0f} ккал\n"
+                f"{confirm_first_line}"
                 f"Б {totals.get('protein', 0):.0f}г · "
                 f"Ж {totals.get('fats', 0):.0f}г · "
                 f"У {totals.get('carbs', 0):.0f}г"
                 f"{budget}"
             )
+            if is_plan:
+                confirm_text += (
+                    "\n<i>Считаю как съеденное. Когда доешь или что-то останется — "
+                    "напиши мне, например «минус 2 яйца» или «съела всё».</i>"
+                )
             await safe_edit_text(callback.message, confirm_text, parse_mode="HTML")
 
             await _maybe_record_first_food(telegram_user_id, callback.message)

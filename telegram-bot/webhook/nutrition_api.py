@@ -24,6 +24,7 @@ from database.crud import (
     delete_nutrition_item,
     delete_nutrition_log,
     get_recent_product_names,
+    set_meal_status,
 )
 from core.health.garmin_data import sync_today_garmin
 from webhook.tg_auth import get_tg_user
@@ -97,8 +98,10 @@ async def get_day(
                     "slot": slot,
                     "items": [_item_to_wire(i, it) for i, it in enumerate(items_enriched)],
                     "totals": _totals_to_wire(meal_totals),
+                    "status": r.status,
                 }
             )
+        open_plans = sum(1 for r in rows if r.status == "plan")
         # Override daily fiber with enriched sum (keeps kcal/p/f/c from DB).
         totals_raw = get_nutrition_totals_by_date(db, user_id=user_id, date=for_date)
         totals_raw["fiber"] = round(total_fiber_enriched, 1)
@@ -131,6 +134,7 @@ async def get_day(
     return {
         "date": for_date.isoformat(),
         "meals": meals,
+        "open_plans": open_plans,
         "totals_day": totals_day,
         "goals": goals,
     }
@@ -290,6 +294,7 @@ class PatchMealPayload(BaseModel):
     meal_id: int
     meal_name: Optional[str] = None
     meal_time: Optional[str] = None  # "HH:MM"
+    status: Optional[str] = None
 
 
 @router.patch("/api/meal")
@@ -316,12 +321,17 @@ async def patch_meal(payload: PatchMealPayload, tg_user: dict = Depends(get_tg_u
                 meal_name=payload.meal_name,
                 meal_time=mt,
             )
+            if payload.status is not None:
+                row = set_meal_status(db=db, meal_id=payload.meal_id, user_id=user_id, status=payload.status)
         except LookupError:
             raise HTTPException(status_code=404, detail="meal not found")
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
         result = {
             "meal_id": row.id,
             "meal_name": row.meal_name,
             "meal_time": row.meal_time.strftime("%H:%M") if row.meal_time else None,
+            "status": row.status,
         }
     finally:
         db.expire_all()

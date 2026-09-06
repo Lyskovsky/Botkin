@@ -96,7 +96,8 @@ async def cmd_help(message: Message):
         "🗣 <b>Голос:</b> 'Завтрак: 2 яйца и хлеб'.\n"
         "📝 <b>Текст:</b> 'Ужин: стейк и салат'.\n"
         "<i>💡 Называйте прием (Завтрак/Ужин) или учту текущее время. Это для контроля углеводов.</i>\n"
-        "<i>💡 Уточняйте: 'вареная гречка', 'сухой рис', 'готовая паста' — иначе бот считает как сухой продукт.</i>\n\n"
+        "<i>💡 Уточняйте: 'вареная гречка', 'сухой рис', 'готовая паста' — иначе бот считает как сухой продукт.</i>\n"
+        "📋 <b>План:</b> 'План: 3 яйца, творог' — внести еду авансом, потом 'минус 2 яйца' или 'съела всё'.\n\n"
         "💊 <b>Витамины и Лекарства:</b>\n"
         "📸 <b>Фото:</b> Таблетки на ладони или упаковки.\n"
         "🗣 <b>Голос:</b> 'Выпил утренние', 'Принял нурофен'.\n"
@@ -172,6 +173,14 @@ async def cmd_day(message: Message, user_id: int):
 
         service = get_nutrition_service(user_id=user_id)
         stats = service.get_day_stats(today_date)
+
+        from database.crud import get_open_plans
+
+        open_plans = get_open_plans(db, user_id, today_date)
+        plans_text = ""
+        if open_plans:
+            plans_kcal = sum(float((p.totals or {}).get("calories") or 0) for p in open_plans)
+            plans_text = f"\n📋 В плане, не закрыто: {len(open_plans)} · {plans_kcal:.0f} ккал (уже в итоге)"
 
         totals = stats["totals"]
         targets = stats["targets"]
@@ -281,6 +290,8 @@ async def cmd_day(message: Message, user_id: int):
         ]
         if fiber_line:
             response_parts.append(fiber_line)
+        if plans_text:
+            response_parts.append(plans_text)
 
         # Weight and supplements
         response_parts.append("")

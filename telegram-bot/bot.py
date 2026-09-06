@@ -269,6 +269,17 @@ def register_handlers(dp: Dispatcher):
         errors.append(f"Обработчик /persona: {e}")
         logger.error(f"❌ Ошибка регистрации обработчика /persona: {e}")
 
+    try:
+        from handlers.plan_close import router as plan_close_router
+
+        dp.include_router(plan_close_router)
+        count = len(plan_close_router.observers) if hasattr(plan_close_router, "observers") else 0
+        handlers_count += count
+        registered_modules.append("plan-close")
+    except Exception as e:
+        errors.append(f"Обработчик plan-close: {e}")
+        logger.error(f"❌ Ошибка регистрации обработчика plan-close: {e}")
+
     # Apple Health handlers removed
     pass
 

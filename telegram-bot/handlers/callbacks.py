@@ -18,3 +18,10 @@ class HealthConnectCallback(CallbackData, prefix="ahconn"):
 
 class SupplementConfirmationCallback(CallbackData, prefix="suppl"):
     action: str  # "save" или "cancel"
+
+
+class PlanCloseCallback(CallbackData, prefix="plan"):
+    """Кнопки вечернего вопроса «план на сегодня доеден целиком?» (#407)."""
+
+    action: str  # "all" — закрыть все планы дня | "edit" — подсказать, как править
+    date: str  # YYYY-MM-DD

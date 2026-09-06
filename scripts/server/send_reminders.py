@@ -20,7 +20,7 @@ import argparse
 import logging
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent.parent
@@ -43,6 +43,12 @@ from core.reminders.meal_reminders import (  # noqa: E402
     normalize_times,
     parse_hhmm,
 )
+from core.reminders.plan_close import (  # noqa: E402
+    PLAN_CLOSE_KEY,
+    build_keyboard,
+    build_question,
+    should_ask,
+)
 
 logger = logging.getLogger("send_reminders")
 
@@ -53,12 +59,15 @@ SUPPLEMENT_WINDOW_MIN = 120  # окно после supplement_reminder_time
 LOGGED_PRE_MINUTES = 90  # «приём залогирован», если запись в [slot-90, slot+grace]
 
 
-def _send(token: str, chat_id: int, text: str, dry: bool) -> bool:
+def _send(token: str, chat_id: int, text: str, dry: bool, reply_markup: dict | None = None) -> bool:
     if dry:
         logger.info("[dry] -> %s: %s", chat_id, text.replace("\n", " ")[:80])
         return True
     url = f"{TELEGRAM_API_BASE}/bot{token}/sendMessage"
-    resp = requests.post(url, json={"chat_id": chat_id, "text": text}, timeout=REQUEST_TIMEOUT)
+    payload = {"chat_id": chat_id, "text": text}
+    if reply_markup is not None:
+        payload["reply_markup"] = reply_markup
+    resp = requests.post(url, json=payload, timeout=REQUEST_TIMEOUT)
     body = resp.json()
     if resp.status_code != 200 or not body.get("ok"):
         logger.error("Telegram error chat=%s: %s", chat_id, body.get("description", resp.text))
@@ -83,6 +92,85 @@ def _logged_labels(db, NutritionLog, uid, today, tz, meal_times, grace=DEFAULT_G
         if any(slot_min - LOGGED_PRE_MINUTES <= m <= slot_min + grace for m in logged_minutes):
             labels.add(label)
     return labels
+
+
+def dispatch_plan_close(db, token: str, dry: bool = False, now_fn=None) -> int:
+    """Вечерний вопрос «план доеден целиком?» (#407) — отдельный проход по ВСЕМ
+    пользователям с открытыми планами на сегодня (не только тем, у кого включены
+    meal_reminders_enabled/supplement_reminders_enabled — это отдельная фича).
+
+    now_fn(tz) -> datetime — инжектируемый источник времени для тестов
+    (по умолчанию datetime.now(tz)).
+    """
+    from core.infra.tz import get_user_tz  # lazy: патчится в тестах поверх модуля
+    from database.crud import get_open_plans
+    from database.models import NutritionLog, UserSettings
+
+    if now_fn is None:
+
+        def now_fn(tz):
+            return datetime.now(tz)
+
+    sent = 0
+    changed_any = False
+
+    today_utc = datetime.now(timezone.utc).date()
+    date_window = [today_utc - timedelta(days=1), today_utc, today_utc + timedelta(days=1)]
+    candidate_uids = [
+        row[0]
+        for row in (
+            db.query(NutritionLog.user_id)
+            .filter(NutritionLog.status == "plan", NutritionLog.date.in_(date_window))
+            .distinct()
+            .all()
+        )
+        if row[0] is not None
+    ]
+
+    for uid in candidate_uids:
+        try:
+            tz = get_user_tz(uid)
+            now_local = now_fn(tz)
+            today = now_local.date()
+
+            plans = get_open_plans(db, uid, today)
+            if not plans:
+                continue
+
+            settings = db.query(UserSettings).filter(UserSettings.user_id == uid).first()
+            if settings is None:
+                settings = UserSettings(user_id=uid)
+                db.add(settings)
+                db.flush()
+
+            today_iso = today.isoformat()
+            last_sent = dict(settings.meal_reminder_last_sent or {})
+            if not should_ask(now_local, last_sent, today_iso):
+                continue
+
+            kcal_total = sum(float((plan.totals or {}).get("calories", 0) or 0) for plan in plans)
+            text = build_question(len(plans), kcal_total)
+            keyboard = build_keyboard(today_iso)
+
+            if _send(token, uid, text, dry, reply_markup=keyboard):
+                last_sent[PLAN_CLOSE_KEY] = today_iso
+                settings.meal_reminder_last_sent = last_sent
+                sent += 1
+                changed_any = True
+                if not dry:
+                    # Коммит на каждого пользователя: rollback при ошибке следующего
+                    # не должен стирать уже проставленный дедуп-ключ (иначе повторный вопрос).
+                    db.commit()
+
+        except Exception:  # noqa: BLE001 — один пользователь не должен срывать рассылку остальным
+            logger.exception("plan_close: ошибка для user_id=%s, пропускаю", uid)
+            db.rollback()
+            continue
+
+    if changed_any and not dry:
+        db.commit()
+
+    return sent
 
 
 def run(dry: bool = False) -> int:
@@ -148,6 +236,12 @@ def run(dry: bool = False) -> int:
 
         if not dry:
             db.commit()
+
+        # --- Вечерний вопрос «план доеден целиком?» (#407) — отдельный проход,
+        # для ВСЕХ пользователей с открытыми планами (не только тех, у кого
+        # включены meal_reminders_enabled/supplement_reminders_enabled выше). ---
+        plan_close_sent = dispatch_plan_close(db, token, dry)
+        sent_total += plan_close_sent
     finally:
         db.close()
 

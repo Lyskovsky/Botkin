@@ -113,3 +113,28 @@ def test_rejects_multi_meals_container_with_typo_in_sub_meal_via_helper():
             meal_totals={"calories": 200},
             photo_path=["/tmp/x.jpg"],  # опечатка, как и в основном флоу
         )
+
+
+def test_is_plan_true_validates():
+    """#407: is_plan=True — валидный флаг записи-плана."""
+    data = MealStateData(meal_items=[{"product": "Банан"}], meal_totals={"calories": 100}, is_plan=True)
+    assert data.is_plan is True
+
+
+def test_is_plan_defaults_to_none():
+    data = MealStateData(meal_items=[{"product": "Банан"}], meal_totals={"calories": 100})
+    assert data.is_plan is None
+
+
+def test_build_meal_state_data_carries_is_plan_true():
+    result = build_meal_state_data(meal_items=[], meal_totals={}, is_plan=True)
+    assert result["is_plan"] is True
+
+
+def test_build_meal_state_data_omits_is_plan_when_none():
+    """build_meal_state_data(exclude_none=True) не должен класть is_plan=None в dict —
+
+    иначе он бы затирал сохранённый is_plan при пересборке состояния.
+    """
+    result = build_meal_state_data(meal_items=[], meal_totals={}, is_plan=None)
+    assert "is_plan" not in result
