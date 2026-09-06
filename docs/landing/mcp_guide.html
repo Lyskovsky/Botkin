@@ -2,7 +2,7 @@
 <html lang="ru">
 <head>
 <meta charset="utf-8">
-<title>Botkin — MCP для Claude Desktop</title>
+<title>Botkin — MCP для твоего AI</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <link rel="icon" type="image/png" href="assets/favicon.png">
 <style>
@@ -51,11 +51,11 @@ a { color: var(--g); }
 
 <div class="container">
 
-<h1>Botkin MCP — свой Claude Desktop видит твои данные</h1>
-<p class="lead">Для тех, у кого на компьютере уже есть Claude Desktop: подключаешь коннектор — и Claude в любом чате видит твои данные из Botkin, а не общие слова.</p>
+<h1>Botkin MCP — твой личный AI видит твои данные</h1>
+<p class="lead">Для тех, у кого есть любой MCP-совместимый AI (Claude Desktop, или другой клиент, поддерживающий MCP): подключаешь коннектор — и AI в любом чате видит твои данные из Botkin, а не общие слова.</p>
 
 <h2>Что это</h2>
-<p><a href="https://modelcontextprotocol.io" target="_blank" rel="noopener">MCP (Model Context Protocol)</a> — открытый стандарт, по которому AI-приложение вроде Claude Desktop подключается к внешним источникам данных. Botkin MCP — наш коннектор, он отдаёт Claude:</p>
+<p><a href="https://modelcontextprotocol.io" target="_blank" rel="noopener">MCP (Model Context Protocol)</a> — открытый стандарт, по которому AI-приложение подключается к внешним источникам данных. Поддерживают его не только Claude Desktop — ниже описан путь через него (готовый однокликовый коннектор), но сам протокол открытый, и способ «вручную» ниже работает в любом MCP-клиенте. Botkin MCP — наш коннектор, он отдаёт AI:</p>
 <ul>
   <li>питание за любой период (КБЖУ, продукты, калории)</li>
   <li>вес, % жира, давление, биомаркеры</li>
@@ -74,14 +74,14 @@ a { color: var(--g); }
 </div>
 <p>Последний пример — вся суть: Botkin MCP видит «2800 ккал 18 мая», Filesystem-коннектор видит личную запись за то же число — и Claude сопоставляет их сам, а дневник при этом никуда на сервер не уходит.</p>
 
-<h2>Как подключить</h2>
-<p><b>Шаг 1 — получи токен в боте.</b> В чате с <a href="https://t.me/Botkin_md_bot">@Botkin_md_bot</a> напиши <code>/connect_mcp</code>. Бот спросит, какой доступ нужен: полный (чтение и запись — для своего личного Claude) или только чтение (можно отдать врачу или ещё кому-то — он увидит данные, но не сможет ничего изменить). Выдаст токен вида <code>pat_...</code> — это личный ключ, не публикуй его. Управлять токенами (посмотреть, отозвать) — командой <code>/my_connections</code>.</p>
+<h2>Как подключить через Claude Desktop</h2>
+<p><b>Шаг 1 — получи токен в боте.</b> В чате с <a href="https://t.me/Botkin_md_bot">@Botkin_md_bot</a> напиши <code>/connect_mcp</code>. Бот спросит, какой доступ нужен: полный (чтение и запись — для своего личного AI) или только чтение (можно отдать врачу или ещё кому-то — он увидит данные, но не сможет ничего изменить). Выдаст токен вида <code>pat_...</code> — это личный ключ, не публикуй его. Управлять токенами (посмотреть, отозвать) — командой <code>/my_connections</code>.</p>
 <p><b>Шаг 2 — скачай коннектор.</b> Файл <code>botkin-connector.mcpb</code> — в <a href="https://github.com/botkin-health/Botkin/releases">Releases репозитория</a> или спроси у Александра.</p>
 <p><b>Шаг 3 — установи в Claude Desktop.</b> Settings → Extensions → «Install extension» → выбери скачанный <code>.mcpb</code>. Вставь токен из шага 1 в поле «Токен Botkin». Поле «Сервер API» не трогай — там уже правильный адрес.</p>
-<p><b>Шаг 4 — проверь.</b> В новом чате напиши «покажи мой профиль из Botkin» — Claude ответит твоими реальными данными.</p>
+<p><b>Шаг 4 — проверь.</b> В новом чате напиши «покажи мой профиль из Botkin» — AI ответит твоими реальными данными.</p>
 
-<h2>Если .mcpb недоступен — вручную</h2>
-<p>Открой <code>claude_desktop_config.json</code> (macOS: <code>~/Library/Application Support/Claude/claude_desktop_config.json</code>, Windows: <code>%APPDATA%\Claude\claude_desktop_config.json</code>) и добавь:</p>
+<h2>Другой MCP-клиент или .mcpb недоступен — вручную</h2>
+<p>Токен из <code>/connect_mcp</code> (см. выше) добавляется обычным <code>mcpServers</code>-конфигом — этот способ работает в любом MCP-клиенте, который его поддерживает, не только в Claude Desktop. Для Claude Desktop конфиг лежит в <code>claude_desktop_config.json</code> (macOS: <code>~/Library/Application Support/Claude/claude_desktop_config.json</code>, Windows: <code>%APPDATA%\Claude\claude_desktop_config.json</code>) — открой и добавь:</p>
 <pre><code>{
   "mcpServers": {
     "botkin": {
