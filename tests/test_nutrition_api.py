@@ -61,6 +61,7 @@ def test_get_day_empty(client):
     body = r.json()
     assert body["date"] == "2026-04-17"
     assert body["meals"] == []
+    assert body["open_plans"] == 0
     assert body["totals_day"] == {"kcal": 0, "p": 0, "f": 0, "c": 0, "fib": 0}
     # Baseline macro goals must always be present
     assert {"kcal", "protein", "fats", "carbs", "fiber"} <= set(body["goals"].keys())
@@ -288,6 +289,50 @@ def test_patch_meal_fields(client, api_db):
     assert day["meals"][0]["meal_name"] == "Поздний обед"
     assert day["meals"][0]["meal_time"] == "15:30"
     assert day["meals"][0]["slot"] == "snack"
+
+
+def test_get_day_exposes_status(client, api_db):
+    create_nutrition_log(
+        db=api_db,
+        user_id=895655,
+        date=date(2026, 4, 17),
+        meal_time=time(9, 0),
+        meal_name="Завтрак",
+        items=[
+            {
+                "product": "Яйца",
+                "weight_g": 110,
+                "calories": 155,
+                "protein": 13,
+                "fats": 11,
+                "carbs": 1,
+                "fiber": 0,
+            }
+        ],
+        totals={"calories": 155, "protein": 13, "fats": 11, "carbs": 1, "fiber": 0},
+        status="plan",
+    )
+    body = client.get("/api/day?date=2026-04-17").json()
+    assert body["meals"][0]["status"] == "plan"
+    assert body["open_plans"] == 1
+
+
+def test_patch_meal_status(client, api_db):
+    row = create_nutrition_log(
+        db=api_db,
+        user_id=895655,
+        date=date(2026, 4, 17),
+        meal_time=time(9, 0),
+        meal_name="Завтрак",
+        items=[{"product": "Яйца", "weight_g": 110, "calories": 155}],
+        totals={"calories": 155},
+        status="plan",
+    )
+    r = client.patch("/api/meal", json={"meal_id": row.id, "status": "eaten"})
+    assert r.status_code == 200
+    assert r.json()["status"] == "eaten"
+    r2 = client.patch("/api/meal", json={"meal_id": row.id, "status": "weird"})
+    assert r2.status_code == 400
 
 
 def test_delete_meal_item(client, api_db):
