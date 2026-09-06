@@ -41,7 +41,9 @@ services:
       # read-only: бот их только показывает, не должен иметь права удалить бэкапы.
       - /opt/backups:/app/backups:ro
     ports:
-      # nginx на хосте проксирует https://health.orangegate.cc → 127.0.0.1:8081.
+      # nginx на хосте проксирует https://botkin.health → 127.0.0.1:8081
+      # (legacy-домен health.orangegate.cc остаётся отдельным vhost на тот же порт —
+      # принимает старый HAE-webhook, см. telegram-bot/webhook/apple_health.py).
       # Bind на loopback — наружу порт не открыт. Caddy-ingress — отдельная задача.
       - "127.0.0.1:8081:8081"
     networks:

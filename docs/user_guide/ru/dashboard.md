@@ -7,7 +7,7 @@
 У каждого юзера есть **личная ссылка вида:**
 
 ```
-https://health.orangegate.cc/mc/{share_token}
+https://botkin.health/mc/{share_token}
 ```
 
 `share_token` — уникальный длинный токен. Открывается без пароля (security-by-obscurity): если знаешь токен — видишь дашборд.
@@ -115,7 +115,7 @@ https://health.orangegate.cc/mc/{share_token}
 
 Реальный dashboard Александра — открыт публично (с его согласия):
 
-[https://health.orangegate.cc/mc/21e58962-0368-457f-8a5d-93c66762e156](https://health.orangegate.cc/mc/21e58962-0368-457f-8a5d-93c66762e156)
+[https://botkin.health/mc/21e58962-0368-457f-8a5d-93c66762e156](https://botkin.health/mc/21e58962-0368-457f-8a5d-93c66762e156)
 
 Открой и посмотри живьём — увидишь как выглядит насыщенный дашборд при 4 месяцах активного трекинга.
 

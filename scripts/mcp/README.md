@@ -30,7 +30,7 @@ mcpb pack .            # соберёт botkin-connector.mcpb (manifest + скр
 
 Затем пользователь открывает `.mcpb` в Claude Desktop → Settings → Extensions,
 вставляет токен из бота в поле «Токен Botkin». `base_url` менять не нужно
-(дефолт — прод `https://health.orangegate.cc`; для дев-стенда — свой адрес).
+(дефолт — прод `https://botkin.health`; для дев-стенда — свой адрес).
 
 > ⚠️ Python-`.mcpb` исполняется системным Python пользователя. Для нетехнических
 > пользователей (напр. Ника) на след. шаге планируется PyInstaller-бинарь, чтобы не
