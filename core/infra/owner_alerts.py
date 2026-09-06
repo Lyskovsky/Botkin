@@ -15,9 +15,10 @@ from pathlib import Path
 
 import requests
 
+from config.users import ADMIN_USER_ID
+
 logger = logging.getLogger(__name__)
 
-OWNER_TELEGRAM_ID = 895655
 _COOLDOWN_SECONDS = 6 * 3600  # не чаще раза в 6 часов на один alert_key
 _STATE_PATH = Path(__file__).resolve().parents[2] / "data" / "cache" / "owner_alerts.json"
 
@@ -55,7 +56,7 @@ def notify_owner(alert_key: str, text: str) -> None:
         token = get_settings().telegram_bot_token
         requests.post(
             f"https://api.telegram.org/bot{token}/sendMessage",
-            json={"chat_id": OWNER_TELEGRAM_ID, "text": text},
+            json={"chat_id": ADMIN_USER_ID, "text": text},
             timeout=10,
         )
         _mark_sent(alert_key)
