@@ -499,6 +499,7 @@ def test_adjust_meal_items_dry_run_then_apply(client, db_session):
             "changes": [{"idx": 0, "new_weight": 50}],
             "leftover_to_slot": "lunch",
             "close_plan": True,
+            "dry_run": False,
         },
     ).json()
     assert real["leftover"]["status"] == "plan" and real["leftover"]["id"] and real["meal"]["status"] == "eaten"
@@ -509,7 +510,14 @@ def test_adjust_meal_items_dry_run_then_apply(client, db_session):
 def test_adjust_meal_items_close_only(client, db_session):
     """#407: changes=[] с close_plan=true просто закрывает план («съела всё»)."""
     plan = _seed_meal(db_session, status="plan")
-    r = client.post("/api/agent/adjust_meal_items", json={"meal_id": plan.id, "changes": [], "close_plan": True})
+    # без явного dry_run=false ничего не меняется (безопасный дефолт)
+    preview = client.post("/api/agent/adjust_meal_items", json={"meal_id": plan.id, "changes": [], "close_plan": True})
+    assert preview.status_code == 200 and preview.json()["dry_run"] is True
+    assert client.get("/api/agent/recent_meals?days=1").json()["meals"][0]["status"] == "plan"
+    r = client.post(
+        "/api/agent/adjust_meal_items",
+        json={"meal_id": plan.id, "changes": [], "close_plan": True, "dry_run": False},
+    )
     assert r.status_code == 200 and r.json()["meal"]["status"] == "eaten"
 
 
@@ -535,7 +543,7 @@ def test_log_meal_text_as_plan(client, db_session, mock_food_llm):
     """#407: as_plan=true пишет запись со status='plan' (еда внесена авансом)."""
     r = client.post("/api/agent/log_meal_text", json={"text": "2 яйца", "as_plan": True})
     assert r.status_code == 200
-    assert r.json()["meal_status"] == "plan"
+    assert r.json()["meal"]["status"] == "plan"
     assert client.get("/api/agent/recent_meals?days=1").json()["meals"][0]["status"] == "plan"
 
 

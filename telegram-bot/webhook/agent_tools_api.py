@@ -264,7 +264,7 @@ class AdjustMealItemsRequest(BaseModel):
     leftover_to_slot: Optional[str] = None  # breakfast/lunch/dinner/snack → остаток новой записью-планом
     leftover_to_date: Optional[str] = None  # YYYY-MM-DD, по умолчанию сегодня
     close_plan: bool = False
-    dry_run: bool = False
+    dry_run: bool = True  # безопасный дефолт: без явного dry_run=false ничего не меняем
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -434,7 +434,7 @@ async def log_meal_text(
         "meal_name": meal_name,
         "items_count": len(items),
         "totals": totals,
-        "meal_status": log_status,
+        "meal": {"id": log.id, "status": log_status},
     }
 
 
