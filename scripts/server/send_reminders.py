@@ -96,7 +96,6 @@ def _logged_labels(db, NutritionLog, uid, today, tz, meal_times, grace=DEFAULT_G
 
 def dispatch_plan_close(db, token: str, dry: bool = False, now_fn=None) -> int:
     """Вечерний вопрос «план доеден целиком?» (#407) — отдельный проход по ВСЕМ
-
     пользователям с открытыми планами на сегодня (не только тем, у кого включены
     meal_reminders_enabled/supplement_reminders_enabled — это отдельная фича).
 
@@ -129,34 +128,40 @@ def dispatch_plan_close(db, token: str, dry: bool = False, now_fn=None) -> int:
     ]
 
     for uid in candidate_uids:
-        tz = get_user_tz(uid)
-        now_local = now_fn(tz)
-        today = now_local.date()
+        try:
+            tz = get_user_tz(uid)
+            now_local = now_fn(tz)
+            today = now_local.date()
 
-        plans = get_open_plans(db, uid, today)
-        if not plans:
+            plans = get_open_plans(db, uid, today)
+            if not plans:
+                continue
+
+            settings = db.query(UserSettings).filter(UserSettings.user_id == uid).first()
+            if settings is None:
+                settings = UserSettings(user_id=uid)
+                db.add(settings)
+                db.flush()
+
+            today_iso = today.isoformat()
+            last_sent = dict(settings.meal_reminder_last_sent or {})
+            if not should_ask(now_local, last_sent, today_iso):
+                continue
+
+            kcal_total = sum(float((plan.totals or {}).get("calories", 0) or 0) for plan in plans)
+            text = build_question(len(plans), kcal_total)
+            keyboard = build_keyboard(today_iso)
+
+            if _send(token, uid, text, dry, reply_markup=keyboard):
+                last_sent[PLAN_CLOSE_KEY] = today_iso
+                settings.meal_reminder_last_sent = last_sent
+                sent += 1
+                changed_any = True
+
+        except Exception:  # noqa: BLE001 — один пользователь не должен срывать рассылку остальным
+            logger.exception("plan_close: ошибка для user_id=%s, пропускаю", uid)
+            db.rollback()
             continue
-
-        settings = db.query(UserSettings).filter(UserSettings.user_id == uid).first()
-        if settings is None:
-            settings = UserSettings(user_id=uid)
-            db.add(settings)
-            db.flush()
-
-        today_iso = today.isoformat()
-        last_sent = dict(settings.meal_reminder_last_sent or {})
-        if not should_ask(now_local, last_sent, today_iso):
-            continue
-
-        kcal_total = sum(float((plan.totals or {}).get("calories", 0) or 0) for plan in plans)
-        text = build_question(len(plans), kcal_total)
-        keyboard = build_keyboard(today_iso)
-
-        if _send(token, uid, text, dry, reply_markup=keyboard):
-            last_sent[PLAN_CLOSE_KEY] = today_iso
-            settings.meal_reminder_last_sent = last_sent
-            sent += 1
-            changed_any = True
 
     if changed_any and not dry:
         db.commit()

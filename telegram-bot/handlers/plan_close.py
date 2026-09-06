@@ -9,6 +9,7 @@
 """
 
 import logging
+from datetime import date as date_cls
 
 from aiogram import Router
 from aiogram.types import CallbackQuery
@@ -52,30 +53,33 @@ async def handle_plan_close(callback: CallbackQuery, callback_data: PlanCloseCal
 
         await callback.answer()
 
-        year, month, day = (int(x) for x in callback_data.date.split("-"))
-        from datetime import date as date_cls
+        try:
+            for_date = date_cls.fromisoformat(callback_data.date)
+        except ValueError:
+            logger.warning("PlanCloseCallback: некорректная дата %r (user_id=%s)", callback_data.date, user_id)
+            await safe_edit_text(callback.message, "Не разобрал дату плана — попробуй закрыть его в Дневнике.")
+            return
 
-        for_date = date_cls(year, month, day)
-
+        # Всю работу с БД делаем ДО сетевого вызова в Telegram и закрываем сессию:
+        # открытая транзакция поперёк await — прецедент #347 (idle_in_transaction_timeout).
         db = SessionLocal()
         try:
             open_plans = get_open_plans(db, user_id, for_date)
-            if not open_plans:
-                await safe_edit_text(callback.message, "Открытых планов уже нет.")
-                return
-
-            kcal_total = 0.0
-            for plan in open_plans:
-                totals = plan.totals or {}
-                kcal_total += float(totals.get("calories", 0) or 0)
-                set_meal_status(db, plan.id, user_id, "eaten")
-
             count = len(open_plans)
-            word = plans_word(count)
-            text = f"✅ План закрыт: {count} {word} · {kcal_total:.0f} ккал учтены как съеденные."
-            await safe_edit_text(callback.message, text)
+            kcal_total = sum(float((plan.totals or {}).get("calories", 0) or 0) for plan in open_plans)
+            for plan in open_plans:
+                set_meal_status(db, plan.id, user_id, "eaten")
         finally:
             db.close()
+
+        if not count:
+            await safe_edit_text(callback.message, "Открытых планов уже нет.")
+            return
+        text = f"✅ План закрыт: {count} {plans_word(count)} · {kcal_total:.0f} ккал учтены как съеденные."
+        await safe_edit_text(callback.message, text)
     except Exception:
         logger.exception("Ошибка обработки PlanCloseCallback для user_id=%s", user_id)
-        raise
+        try:
+            await callback.answer("⚠️ Не получилось закрыть план, попробуй позже.", show_alert=True)
+        except Exception:  # noqa: BLE001 — callback мог уже быть отвечен
+            pass

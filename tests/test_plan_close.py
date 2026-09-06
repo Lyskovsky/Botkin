@@ -307,3 +307,30 @@ def test_dispatch_plan_close_sends_once_and_is_idempotent(test_db):
 
     assert count2 == 0
     assert sent_calls == []
+
+
+def test_dispatch_plan_close_one_failing_user_does_not_abort_others(test_db):
+    """Ошибка отправки одному пользователю не срывает вечерний вопрос остальным."""
+    import scripts.server.send_reminders as send_reminders
+
+    today = date(2026, 9, 6)
+    failing_uid, ok_uid = 895710, 895711
+    _seed_user_with_open_plan(test_db, failing_uid, today)
+    _seed_user_with_open_plan(test_db, ok_uid, today)
+    fake_now = datetime(2026, 9, 6, 21, 30)
+    sent_calls = []
+
+    def fake_send(token, chat_id, text, dry, reply_markup=None):
+        if chat_id == failing_uid:
+            raise RuntimeError("telegram down for this chat")
+        sent_calls.append(chat_id)
+        return True
+
+    with (
+        patch.object(send_reminders, "_send", side_effect=fake_send),
+        patch("core.infra.tz.get_user_tz", return_value=None),
+    ):
+        count = send_reminders.dispatch_plan_close(test_db, token="dummy", dry=False, now_fn=lambda tz: fake_now)
+
+    assert count == 1
+    assert sent_calls == [ok_uid]
