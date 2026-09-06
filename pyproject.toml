@@ -2,7 +2,7 @@
 name = "botkin"
 # Runtime-источник истины — core/_version.py. Здесь дублируется для pip/build-инструментов.
 # Бампать через scripts/bump_version.py (обновит оба файла + landing).
-version = "0.5.0"
+version = "0.6.0"
 description = "Personal health analytics platform — Telegram bot + dashboard + MCP."
 requires-python = ">=3.11"
 license = {text = "AGPL-3.0-or-later"}

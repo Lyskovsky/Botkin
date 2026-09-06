@@ -82,7 +82,19 @@ git worktree remove .claude/worktrees/<slug>
 
 > «Ветка в `dev`, задача закрыта. Готово к проду? Открыть PR `dev → main` с ревьюером @Lyskovsky?»
 
-Если **да**:
+Если **да** — сначала бампнуть версию (SemVer, pre-1.0: patch за багфиксы, minor
+за заметные фичи), если в этом накоплении dev есть что-то user-visible со
+времени последнего релиза (сверить текущую версию — `docs/landing/index.html`
+футер/pill или `core/_version.py` — с тем, что реально накопилось):
+```bash
+python scripts/bump_version.py X.Y.Z
+git add core/_version.py pyproject.toml docs/landing/index.html
+git commit -m "release: vX.Y.Z"
+git push origin dev
+```
+Только «просто sync, багфиксов на минор не тянет» — можно пропустить бамп.
+
+Затем PR:
 ```bash
 gh pr create \
   --base main \
