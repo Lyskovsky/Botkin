@@ -47,12 +47,13 @@ logger = logging.getLogger(__name__)
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 ANTHROPIC_VERSION = "2023-06-01"
 # Выбор моделей и история откатов — config/models.py (env-переопределяемо).
-# ⚠️ Sonnet 4.5 НЕ поддерживает output_config.effort → в fallback-ветке effort
-# снимается (см. _post_with_overload_retry), иначе 400.
+# Основная модель и fallback (Sonnet 5 / Sonnet 4.6) обе поддерживают
+# output_config.effort — ⚠️ если fallback когда-нибудь укажет на Sonnet 4.5,
+# effort надо будет снимать в _post_with_overload_retry, иначе 400.
 from config.models import AGENT_FALLBACK_MODEL as FALLBACK_MODEL
 from config.models import AGENT_MODEL as MODEL
 
-# effort=medium — документированный sweet spot Sonnet 4.6 для чата: дешевле и
+# effort=medium — документированный sweet spot для чата: дешевле и
 # быстрее дефолтного high, без потери качества на разговорных задачах.
 AGENT_EFFORT = "medium"
 MAX_TOKENS = 4000  # 2000 обрезал развёрнутые многофакторные ответы (прецедент:
@@ -2885,9 +2886,6 @@ def ask_agent(
                         FALLBACK_MODEL,
                     )
                     p = {**p, "model": FALLBACK_MODEL}
-                    # Sonnet 4.5 не поддерживает output_config.effort → снимаем,
-                    # иначе вернёт 400 на fallback-вызове.
-                    p.pop("output_config", None)
                     resp = requests.post(ANTHROPIC_API_URL, headers=request_headers, json=p, timeout=60)
                 return resp
 

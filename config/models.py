@@ -14,12 +14,14 @@
 import os
 
 # ── BotkinClaw (AI-врач, Anthropic Messages API) ────────────────────────────
-# Sonnet 4.6 — рабочая модель агента (откат с Opus 4.8 01.06.2026: Opus давал
-# ~$7.5/активный день ≈ $100/мес; Sonnet в ~5× дешевле при достаточном качестве).
-AGENT_MODEL = os.getenv("BOTKIN_AGENT_MODEL", "claude-sonnet-4-6")
-# Fallback при 529/503/429 — другой compute pool (обычно свободнее).
+# Sonnet 5 — рабочая модель агента (апгрейд с Sonnet 4.6 06.09.2026: та же
+# средняя по цене/качеству линейка, но новее; откат с Opus 4.8 01.06.2026 остаётся
+# в силе — Opus давал ~$7.5/активный день ≈ $100/мес, Sonnet в ~5× дешевле).
+AGENT_MODEL = os.getenv("BOTKIN_AGENT_MODEL", "claude-sonnet-5")
+# Fallback при 529/503/429 — другой compute pool (обычно свободнее), плюс
+# страховка если у Sonnet 5 обнаружится регресс: прошлая рабочая модель.
 # ⚠️ Sonnet 4.5 НЕ поддерживает output_config.effort (см. agent_chat).
-AGENT_FALLBACK_MODEL = os.getenv("BOTKIN_AGENT_FALLBACK_MODEL", "claude-sonnet-4-5")
+AGENT_FALLBACK_MODEL = os.getenv("BOTKIN_AGENT_FALLBACK_MODEL", "claude-sonnet-4-6")
 
 # ── Парсинг еды из текста (core/llm/router.py) ──────────────────────────────
 FOOD_TEXT_MODEL_ANTHROPIC = os.getenv("BOTKIN_FOOD_TEXT_MODEL", "claude-sonnet-4-6")
