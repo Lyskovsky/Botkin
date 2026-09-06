@@ -1288,11 +1288,14 @@ def _apply_meal_changes(items: List[dict], changes: List[dict]) -> tuple:
     """
     from core.food.fiber_table import _item_name, _item_weight
 
+    changes_by_idx: dict = {}
     for ch in changes:
         idx = ch["idx"]
         if idx < 0 or idx >= len(items):
             raise IndexError(f"idx {idx} out of range (have {len(items)} items)")
-    changes_by_idx = {ch["idx"]: ch for ch in changes}
+        if idx in changes_by_idx:
+            raise ValueError(f"idx {idx} указан в changes дважды")
+        changes_by_idx[idx] = ch
 
     kept: List[dict] = []
     leftover: List[dict] = []
@@ -1303,6 +1306,23 @@ def _apply_meal_changes(items: List[dict], changes: List[dict]) -> tuple:
             kept.append(dict(item))
             continue
         old_w = _item_weight(item)
+        if old_w <= 0:
+            # У item нет веса — масштабировать нечего. remove: целиком в остаток; иначе — ошибка,
+            # а не молчаливая потеря записи (ср. update_nutrition_item_weight).
+            if not ch.get("remove"):
+                raise ValueError(f"item idx={idx} ({_item_name(item)}) без веса — можно только remove")
+            leftover.append(dict(item))
+            change_log.append(
+                {
+                    "idx": idx,
+                    "name": _item_name(item),
+                    "old_weight": 0.0,
+                    "new_weight": 0.0,
+                    "old_calories": float(item.get("calories") or 0),
+                    "new_calories": 0.0,
+                }
+            )
+            continue
         new_w = 0.0 if ch.get("remove") else float(ch.get("new_weight", 0) or 0)
         new_w = max(0.0, min(new_w, old_w))
         leftover_w = old_w - new_w

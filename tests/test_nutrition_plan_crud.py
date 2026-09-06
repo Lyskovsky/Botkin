@@ -140,3 +140,46 @@ def test_set_meal_status(test_db):
     assert get_nutrition_log(test_db, row.id, UID).status == "eaten"
     with pytest.raises(ValueError):
         set_meal_status(test_db, row.id, UID, "weird")
+
+
+def test_adjust_item_without_weight_remove_goes_to_leftover(test_db):
+    row = create_nutrition_log(
+        db=test_db,
+        user_id=UID,
+        date=date(2026, 9, 6),
+        meal_time=time(9, 0),
+        meal_name="Завтрак",
+        items=[{"product": "Кофе", "calories": 6}, dict(ITEMS[2])],
+        totals={"calories": 28},
+        status="plan",
+    )
+    res = adjust_meal_items(
+        test_db,
+        row.id,
+        UID,
+        changes=[{"idx": 0, "remove": True}],
+        leftover_to={"date": date(2026, 9, 6), "meal_time": time(13, 0), "meal_name": "Обед"},
+    )
+    assert [_n(it) for it in res["leftover"]["items"]] == ["Кофе"]
+    assert [_n(it) for it in get_nutrition_log(test_db, row.id, UID).items] == ["Огурец"]
+
+
+def test_adjust_item_without_weight_partial_raises(test_db):
+    row = create_nutrition_log(
+        db=test_db,
+        user_id=UID,
+        date=date(2026, 9, 6),
+        meal_time=time(9, 0),
+        meal_name="Завтрак",
+        items=[{"product": "Кофе", "calories": 6}],
+        totals={"calories": 6},
+        status="plan",
+    )
+    with pytest.raises(ValueError):
+        adjust_meal_items(test_db, row.id, UID, changes=[{"idx": 0, "new_weight": 3}])
+
+
+def test_adjust_duplicate_idx_raises(test_db):
+    row = _plan(test_db)
+    with pytest.raises(ValueError):
+        adjust_meal_items(test_db, row.id, UID, changes=[{"idx": 0, "remove": True}, {"idx": 0, "new_weight": 10}])
