@@ -1,9 +1,18 @@
 # Переезд mini-app на botkin.health (снятие времянки orangegate)
 
-> Issue [#212](https://github.com/botkin-health/Botkin/issues/212). Финальный шаг роадмапа
-> «переезд legacy-домена `health.orangegate.cc` → `botkin.health`».
+> Issue [#212](https://github.com/botkin-health/Botkin/issues/212) (docs-only, закрыт PR #223).
+> Применение на проде и полный вывод домена продолжены в зонтичном issue
+> [#387](https://github.com/botkin-health/Botkin/issues/387) — там же Telegram webhook,
+> Whoop OAuth redirect, дефолты MCP-коннектора и ретаймент vhost.
 > Требует SSH к проду (зона владельца сервера) — кодовая часть (целевой vhost) уже в репо:
 > [`nginx-botkin.health.conf`](nginx-botkin.health.conf).
+>
+> ⚠️ **Пины в `/opt/botkin/.env` (сделаны в рамках #387, Фаза 1):** `TELEGRAM_WEBHOOK_URL` и
+> `BOTKIN_API_BASE` явно зафиксированы на `health.orangegate.cc`, хотя дефолты в коде уже
+> переведены на `botkin.health`. Это защита от преждевременного флипа — без готовых
+> nginx-location'ов `/telegram/webhook` и `/api/` смена дефолта в коде на следующем деплое
+> сломала бы бота и mini-app. Снимать пины — только после шага 2 ниже (nginx готов и
+> проверен), см. также разделы «Telegram webhook» и «Whoop OAuth».
 
 ## Зачем
 
@@ -32,6 +41,8 @@
 | `/api/agent/*` | `agent_tools_api.py` | agent-тулзы (под `/api/`) |
 | `/mc/{token}` | `dashboard.py` | дашборд (`/share`, iframe вкладки «Здоровье») |
 | `/r/{token}` | `report.py` | HTML-отчёты (`/report`, #204) |
+| `/telegram/webhook` | `bot.py` | приём апдейтов от Telegram (#387) |
+| `/whoop/connect`, `/whoop/callback` | `whoop_oauth.py` | OAuth-коннект Whoop (#387, координация с Whoop-app Димы) |
 
 > Одной локации `^~ /api/` достаточно для всех `/api/*` (включая `/api/agent`, `/api/profile`,
 > `/api/settings`). У лендинга своих `/api/` нет — конфликта не будет.
@@ -81,3 +92,34 @@
 Вернуть `BOTKIN_PUBLIC_URL=https://health.orangegate.cc` в `/opt/botkin/.env` + `up -d` —
 кнопка/ссылки снова на orangegate (там `location /` проксирует всё на `:8081`). Локации `^~`
 в vhost `botkin.health` откату не мешают (лишними не будут).
+
+## Telegram webhook (#387)
+
+После того как шаги 1-2 выше выполнены (nginx `botkin.health` проверенно проксирует backend,
+включая новый `location ^~ /telegram/webhook`):
+
+1. Снять пин `TELEGRAM_WEBHOOK_URL=https://health.orangegate.cc/telegram/webhook` в
+   `/opt/botkin/.env` (удалить строку — дефолт в коде уже `https://botkin.health/telegram/webhook`).
+2. Перезапустить бота — при старте он сам перерегистрирует webhook (см. `bot.py`, идемпотентно:
+   ставит новый URL только если текущий отличается).
+3. Проверить: `curl -s "https://api.telegram.org/bot$TOKEN/getWebhookInfo"` → `url` содержит
+   `botkin.health`, `last_error_message` пуст после первого апдейта.
+4. Отправить боту тестовое сообщение, убедиться что отвечает.
+
+**Откат:** вернуть пин в `.env`, перезапустить — webhook переедет обратно на orangegate.
+
+## Whoop OAuth (#387, нужен Дима)
+
+Redirect URI Whoop-приложения зарегистрирован на `health.orangegate.cc/whoop/callback` в
+аккаунте Димы (developer-dashboard.whoop.com, см. `whoop-app-instruction-for-dima.md`). Смена
+домена требует его участия:
+
+1. Убедиться, что nginx-location `^~ /whoop/` на `botkin.health` работает (curl `/whoop/connect`).
+2. Попросить Диму зайти в developer-dashboard.whoop.com → своё приложение → сменить
+   Redirect URI на `https://botkin.health/whoop/callback` → сохранить.
+3. После подтверждения от Димы — выставить `WHOOP_REDIRECT_URI=https://botkin.health/whoop/callback`
+   в `/opt/botkin/.env`, перезапустить бота.
+4. Проверить: Дима нажимает «Подключить Whoop» в боте → успешный коллбек, данные приходят.
+
+Пока Дима не поменял Redirect URI на портале — **не трогать** `WHOOP_REDIRECT_URI` в `.env`
+и дефолт в коде: коннект сломается для единственного текущего пользователя Whoop.

@@ -59,7 +59,7 @@ pat_895655_a1b2c3d4e5f6...
 1. Открой **Claude Desktop** → Settings → Extensions
 2. Нажми «Install extension» и выбери скачанный файл `botkin-connector.mcpb`
 3. В поле **«Токен Botkin»** вставь токен из шага 1
-4. Поле **«Сервер API»** оставь как есть (`https://health.orangegate.cc`) — менять не нужно
+4. Поле **«Сервер API»** оставь как есть (`https://botkin.health`) — менять не нужно
 
 ### Шаг 4 — проверь
 
@@ -88,7 +88,7 @@ Claude ответит с твоими данными. Если не работа
       "args": ["/path/to/scripts/mcp/botkin_pat_mcp.py"],
       "env": {
         "BOTKIN_PAT": "pat_895655_a1b2c3d4...",
-        "BOTKIN_API_BASE": "https://health.orangegate.cc"
+        "BOTKIN_API_BASE": "https://botkin.health"
       }
     }
   }

@@ -33,7 +33,7 @@
       "type": "string",
       "title": "Сервер API",
       "description": "Адрес API Botkin. Менять не нужно, кроме дев-стенда.",
-      "default": "https://health.orangegate.cc",
+      "default": "https://botkin.health",
       "required": false
     }
   }

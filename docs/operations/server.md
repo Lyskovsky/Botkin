@@ -31,13 +31,13 @@ ssh -i ~/.ssh/botkin/botkin_igorn igorn@116.203.213.137
 | БД | контейнер `healthvault_postgres` (postgres:15, volume) |
 | Код | `/opt/botkin` — pull-only через GitHub Actions «Deploy prod» (образ из GHCR, без сборки на сервере). Исторически до cutover код жил в `/opt/healthvault` со сборкой на сервере |
 | Бэкапы | `/opt/backups` — nightly `pg_dump` (cron), **root-only** |
-| Ingress | **nginx на хосте** терминирует TLS для `health.orangegate.cc` → `127.0.0.1:8081` |
+| Ingress | **nginx на хосте** терминирует TLS для `botkin.health` → `127.0.0.1:8081` (legacy-домен `health.orangegate.cc` остаётся отдельным vhost — принимает только старый HAE-webhook, см. `apple_health.py`) |
 
 Целевая pull-only модель кладёт стек в `/opt/botkin` (см. `docker-compose.prod.yml`,
 `.github/workflows/deploy-prod.yml`).
 
-> **Переезд mini-app на бренд-домен** `botkin.health` (снятие времянки `BOTKIN_PUBLIC_URL=orangegate`)
-> — чеклист и целевой vhost: [migrate-webapp-to-botkin-health.md](migrate-webapp-to-botkin-health.md) (#212).
+> Переезд mini-app и API на бренд-домен `botkin.health` завершён (#387) — чеклист и целевой
+> vhost как исторический артефакт: [migrate-webapp-to-botkin-health.md](migrate-webapp-to-botkin-health.md) (#212).
 
 ## ⚠️ Важно: хост общий (multi-tenant)
 
