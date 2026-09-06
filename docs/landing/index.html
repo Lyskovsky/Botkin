@@ -959,7 +959,7 @@ flowchart LR
 
 <script>
 // Live counter from public_stats (CORS-открытый endpoint)
-fetch('https://health.orangegate.cc/api/public_stats')  // nginx botkin.health не проксирует /api/ — менять вместе с nginx
+fetch('https://botkin.health/api/public_stats')  // #387: nginx botkin.health теперь проксирует /api/
   .then(r => r.ok ? r.json() : null)
   .then(data => {
     if (!data) return;

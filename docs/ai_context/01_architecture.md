@@ -115,7 +115,7 @@
 | `nutrition_goals.py` | `compute_goals()` — БЖУ-цели на день из настроек+Garmin. |
 | `nutrition_slots.py` | Маппинг `meal_time` → slot (breakfast/lunch/snack/dinner). |
 | `profile_api.py` | GET/POST `/api/profile/bmr` (auto/manual BMR), PATCH `/api/profile/timezone`. |
-| `dashboard.py` | `GET /mc/{token}` — публичный персональный дашборд (health.orangegate.cc/mc/…), встраивается в мини-апп (таб «Здоровье») и шарится через `/share`. |
+| `dashboard.py` | `GET /mc/{token}` — публичный персональный дашборд (botkin.health/mc/…), встраивается в мини-апп (таб «Здоровье») и шарится через `/share`. |
 | `report.py` | Публичные HTML-отчёты `GET /r/{token}` (таблица `health_reports`). |
 | `doctor_report_api.py` | Endpoint для генерации PDF-отчёта врачу (ISO 27269 IPS, ADR-0008) — тонкая обёртка над `services/doctor_report.py`. |
 | `whoop_oauth.py` | OAuth 2.0 подключение носимого Whoop (`/whoop/connect`, `/whoop/callback`); токены в `data/cache/whoop_tokens.json`. |

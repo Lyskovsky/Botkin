@@ -41,8 +41,8 @@ Workflow: собирает Docker-образ бота (job `build`, reusable `bu
 **Smoke test после деплоя** (auth должен корректно отбивать):
 ```bash
 $SSH root@116.203.213.137 "
-  curl -sk -o /dev/null -w 'webapp: %{http_code}\n' https://health.orangegate.cc/webapp/
-  curl -sk -o /dev/null -w 'settings: %{http_code}\n' -H 'Authorization: tma x' https://health.orangegate.cc/api/settings
+  curl -sk -o /dev/null -w 'webapp: %{http_code}\n' https://botkin.health/webapp/
+  curl -sk -o /dev/null -w 'settings: %{http_code}\n' -H 'Authorization: tma x' https://botkin.health/api/settings
 "
 # Ожидаем: webapp 200, settings 403 (отбивает невалидный токен)
 ```
@@ -220,7 +220,7 @@ Env-переменные для юнит-тестов не нужны: dummy-к�
 2. **Состояние БД:** SQL probe (см. `03_database_schema.md` сниппеты)
 3. **Лог Telegram:** в боте есть `debug_logger` — пишет в файл, проверять `data/logs/`
 4. **Network к API:** `curl -sk -H 'Authorization: tma x' …` чтобы увидеть статус
-5. **Если фронт мини-аппа не обновляется** — проверить хеш в HTML: `curl -sk https://health.orangegate.cc/webapp/ | grep day.js`. Хеш должен меняться при изменении JS/CSS.
+5. **Если фронт мини-аппа не обновляется** — проверить хеш в HTML: `curl -sk https://botkin.health/webapp/ | grep day.js`. Хеш должен меняться при изменении JS/CSS.
 
 ---
 
