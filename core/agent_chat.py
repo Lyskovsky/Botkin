@@ -108,7 +108,9 @@ TOOLS: list[dict[str, Any]] = [
             "Недавние приёмы пищи. days=1..90, по умолчанию 3. "
             "Для поиска по длинному периоду («ел ли я X за месяцы», «как часто пельмени») "
             "ставь большой days и compact=true — вернёт компактно (имена продуктов + калории), "
-            "без раздувания контекста. days>14 авто-включает compact."
+            "без раздувания контекста. days>14 авто-включает compact. "
+            "Каждая запись имеет status: eaten | plan. Для «минус N …», «съела всё», "
+            "«остаток на обед» — вызывай с only_open_plans=true."
         ),
         "input_schema": {
             "type": "object",
@@ -118,6 +120,11 @@ TOOLS: list[dict[str, Any]] = [
                     "type": "boolean",
                     "default": False,
                     "description": "Лёгкий формат (имена продуктов + калории) для поиска по длинному периоду.",
+                },
+                "only_open_plans": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Только открытые планы за сегодня (записи, внесённые авансом, status=plan)",
                 },
             },
         },
@@ -635,6 +642,11 @@ TOOLS: list[dict[str, Any]] = [
                     "type": "string",
                     "enum": ["breakfast", "lunch", "dinner", "snack"],
                 },
+                "as_plan": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Записать как план — еда внесена авансом («план:», «на день:», «планирую»)",
+                },
             },
             "required": ["text"],
         },
@@ -670,6 +682,41 @@ TOOLS: list[dict[str, Any]] = [
             "type": "object",
             "properties": {"meal_id": {"type": "integer", "description": "id записи из get_recent_meals"}},
             "required": ["meal_id"],
+        },
+    },
+    {
+        "name": "adjust_meal_items",
+        "description": (
+            "Свести запись-план к факту: изменить вес item (new_weight, граммы) или убрать item (remove) "
+            "ВНУТРИ конкретной записи meal_id (из get_recent_meals; items адресуются индексом idx в массиве items). "
+            "Остаток можно перенести новой записью-планом: leftover_to_slot=lunch/dinner/snack/breakfast "
+            "(+leftover_to_date YYYY-MM-DD, по умолчанию сегодня). close_plan=true — закрыть план (status→eaten); "
+            "changes=[] с close_plan=true — просто закрыть план («съела всё»). "
+            "ВСЕГДА сначала dry_run=true: покажи пользователю, что изменится (было → станет, ккал), дождись «да», "
+            "затем повтори с dry_run=false. Штучные продукты — пропорционально: 3 яйца=165 г → 1 яйцо=55 г."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "meal_id": {"type": "integer"},
+                "changes": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "idx": {"type": "integer"},
+                            "new_weight": {"type": "number"},
+                            "remove": {"type": "boolean"},
+                        },
+                        "required": ["idx"],
+                    },
+                },
+                "leftover_to_slot": {"type": "string", "enum": ["breakfast", "lunch", "dinner", "snack"]},
+                "leftover_to_date": {"type": "string"},
+                "close_plan": {"type": "boolean", "default": False},
+                "dry_run": {"type": "boolean", "default": True},
+            },
+            "required": ["meal_id", "changes"],
         },
     },
     {
@@ -964,6 +1011,8 @@ def _call_tool(name: str, args: dict, token: str) -> str:
             params = {"days": days}
             if args.get("compact"):
                 params["compact"] = "true"
+            if args.get("only_open_plans"):
+                params["only_open_plans"] = "true"
             r = requests.get(
                 f"{TOOLS_API_BASE}/recent_meals",
                 params=params,
@@ -1143,6 +1192,8 @@ def _call_tool(name: str, args: dict, token: str) -> str:
             r = requests.post(f"{TOOLS_API_BASE}/edit_meal", json=args, headers=headers, timeout=10)
         elif name == "delete_meal":
             r = requests.post(f"{TOOLS_API_BASE}/delete_meal", json=args, headers=headers, timeout=10)
+        elif name == "adjust_meal_items":
+            r = requests.post(f"{TOOLS_API_BASE}/adjust_meal_items", json=args, headers=headers, timeout=15)
         elif name == "log_bp":
             r = requests.post(f"{TOOLS_API_BASE}/log_bp", json=args, headers=headers, timeout=10)
         elif name == "log_supplement":
@@ -1989,6 +2040,7 @@ _TOOL_PROGRESS_LABEL = {
     "log_meal_text": "✍️ записываю еду",
     "edit_meal": "✏️ правлю запись о еде",
     "delete_meal": "🗑 удаляю запись о еде",
+    "adjust_meal_items": "📋 свожу план к факту",
     "log_supplement": "✍️ отмечаю добавку",
     "log_bp": "✍️ записываю давление",
     "regenerate_health_token": "🔑 пересоздаю токен",
@@ -2453,6 +2505,32 @@ def ask_agent(
             "\n"
             "Прецедент 19.06.2026: агент показал вымышленный состав (рис вместо киноа),\n"
             "сказал «✅ перенесено в обед» без вызова edit_meal.\n"
+            "\n"
+            "---\n"
+            "\n"
+            "# 📋 ПЛАН → ФАКТ (универсальный, #407)\n"
+            "\n"
+            "Запись со status=plan — еда, внесённая авансом («план: …»). Она УЖЕ считается в итог дня.\n"
+            "Пользователь потом сводит её к факту: «минус 2 яйца», «половину творога не съела»,\n"
+            "«остаток на обед», «съела всё».\n"
+            "\n"
+            "Алгоритм:\n"
+            "1. get_recent_meals(days=1, only_open_plans=true). Пусто → скажи, что открытых планов на сегодня нет,\n"
+            "   и спроси, какую запись править (тогда get_recent_meals(days=2) и adjust_meal_items по ней).\n"
+            "2. Один план → работай с ним. Несколько → спроси какой (назови по имени и времени).\n"
+            "3. Новый вес item считай пропорционально (3 яйца = 165 г → минус 2 = 55 г).\n"
+            "4. adjust_meal_items(..., dry_run=true) → покажи ОДНОЙ строкой: «Яйца 165 г → 55 г, итог 496 → 341 ккал.\n"
+            "   Остаток перенести на обед или убрать?» Если пользователь уже сказал куда — не переспрашивай.\n"
+            "5. После «да» — adjust_meal_items(dry_run=false, leftover_to_slot=…, close_plan=true, если план сведён).\n"
+            "6. «съела всё» → adjust_meal_items(meal_id, changes=[], close_plan=true, dry_run=false) → «✅ План закрыт».\n"
+            "\n"
+            "❌ ЗАПРЕЩЕНО:\n"
+            "- Предлагать delete_meal, когда просят убрать ЧАСТЬ («минус 2 яйца»).\n"
+            "- Искать продукт по всей истории (days>1), если есть открытый план на сегодня.\n"
+            "- Менять запись без dry_run-превью и подтверждения.\n"
+            "\n"
+            "Прецедент 01.09.2026: на «Минус 2 яйца» агент предложил удалить целиком другую запись\n"
+            "«Варёные яйца с огурцом» вместо правки утренней тарелки.\n"
             "\n"
             "---\n"
             "\n"

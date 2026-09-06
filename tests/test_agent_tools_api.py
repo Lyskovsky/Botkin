@@ -462,6 +462,83 @@ def test_delete_meal_scoped_to_user(client, db_session):
     assert r.status_code == 404
 
 
+def test_recent_meals_returns_status_and_filters_open_plans(client, db_session):
+    """#407: recent_meals отдаёт status на каждой записи, only_open_plans фильтрует."""
+    plan = _seed_meal(db_session, status="plan", meal_time=time(9, 0), meal_name="Завтрак")
+    eaten = _seed_meal(db_session)
+    body = client.get("/api/agent/recent_meals?days=1").json()
+    statuses = {m["id"]: m["status"] for m in body["meals"]}
+    assert statuses[plan.id] == "plan" and statuses[eaten.id] == "eaten"
+    only = client.get("/api/agent/recent_meals?days=1&only_open_plans=true").json()["meals"]
+    assert [m["id"] for m in only] == [plan.id]
+
+
+def test_adjust_meal_items_dry_run_then_apply(client, db_session):
+    """#407: dry_run не меняет БД; реальный вызов правит вес, выносит остаток, закрывает план."""
+    plan = _seed_meal(
+        db_session,
+        status="plan",
+        items=[
+            {"product": "Курица", "weight_g": 150, "calories": 250, "protein": 40, "fats": 5, "carbs": 0},
+            {"product": "Рис", "weight_g": 150, "calories": 195, "protein": 4, "fats": 1, "carbs": 42},
+        ],
+        totals={"calories": 445, "protein": 44, "fats": 6, "carbs": 42, "fiber": 0},
+    )
+    dry = client.post(
+        "/api/agent/adjust_meal_items",
+        json={"meal_id": plan.id, "changes": [{"idx": 0, "new_weight": 50}], "dry_run": True},
+    ).json()
+    assert dry["status"] == "ok" and dry["dry_run"] is True
+    assert dry["after_totals"]["calories"] < dry["before_totals"]["calories"]
+    assert client.get("/api/agent/recent_meals?days=1").json()["meals"][0]["totals"]["calories"] == 445
+
+    real = client.post(
+        "/api/agent/adjust_meal_items",
+        json={
+            "meal_id": plan.id,
+            "changes": [{"idx": 0, "new_weight": 50}],
+            "leftover_to_slot": "lunch",
+            "close_plan": True,
+        },
+    ).json()
+    assert real["leftover"]["status"] == "plan" and real["leftover"]["id"] and real["meal"]["status"] == "eaten"
+    meals = client.get("/api/agent/recent_meals?days=1").json()["meals"]
+    assert len(meals) == 2
+
+
+def test_adjust_meal_items_close_only(client, db_session):
+    """#407: changes=[] с close_plan=true просто закрывает план («съела всё»)."""
+    plan = _seed_meal(db_session, status="plan")
+    r = client.post("/api/agent/adjust_meal_items", json={"meal_id": plan.id, "changes": [], "close_plan": True})
+    assert r.status_code == 200 and r.json()["meal"]["status"] == "eaten"
+
+
+def test_adjust_meal_items_bad_idx_400_and_empty_400(client, db_session):
+    """#407: idx вне диапазона → 400, changes=[] без close_plan → 400, чужой/несущ. meal_id → 404."""
+    plan = _seed_meal(db_session, status="plan")
+    assert (
+        client.post(
+            "/api/agent/adjust_meal_items", json={"meal_id": plan.id, "changes": [{"idx": 7, "remove": True}]}
+        ).status_code
+        == 400
+    )
+    assert client.post("/api/agent/adjust_meal_items", json={"meal_id": plan.id, "changes": []}).status_code == 400
+    assert (
+        client.post(
+            "/api/agent/adjust_meal_items", json={"meal_id": 999999, "changes": [{"idx": 0, "remove": True}]}
+        ).status_code
+        == 404
+    )
+
+
+def test_log_meal_text_as_plan(client, db_session, mock_food_llm):
+    """#407: as_plan=true пишет запись со status='plan' (еда внесена авансом)."""
+    r = client.post("/api/agent/log_meal_text", json={"text": "2 яйца", "as_plan": True})
+    assert r.status_code == 200
+    assert r.json()["meal_status"] == "plan"
+    assert client.get("/api/agent/recent_meals?days=1").json()["meals"][0]["status"] == "plan"
+
+
 def test_kb_value_owner_returns_value(client, tmp_path, monkeypatch):
     """GET /kb_value for owner cohort reads knowledge_base.json."""
     import json
