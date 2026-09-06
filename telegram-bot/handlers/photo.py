@@ -1055,6 +1055,13 @@ async def handle_description(
             full_description = clean_description
             logger.info(f"Извлечена дата из описания: {custom_date}, очищенное описание: '{clean_description[:50]}...'")
 
+    # #407: префикс «план:» / «на день:» / «планирую …» — запись вносится
+    # авансом, факт сводится позже. Снимаем ПОСЛЕ извлечения даты, чтобы
+    # "план: вчера ужин ..." парсился как обычно, без слова "план".
+    from core.food.plan_prefix import strip_plan_prefix
+
+    full_description, is_plan = strip_plan_prefix(full_description)
+
     # --- LLM Router Logic ---
     from core.llm.router import analyze_message
     from core.food.nutrition import process_llm_food_data
@@ -1350,6 +1357,7 @@ async def handle_description(
         product_label=(router_result.get("data") or {}).get("product_label")
         or (menu_data or {}).get("product_label")
         or user_state.data.get("product_label"),
+        is_plan=is_plan or None,
     )
     user_state = UserState(user_id=user_id, state="waiting_confirmation", data=new_data)
     state_manager.set_state(user_id, user_state)
@@ -1357,7 +1365,10 @@ async def handle_description(
     # Формируем ответ
 
     # Экранируем названия из vision/LLM/подписи перед вставкой в HTML (issue #115, anti-XSS).
-    response = f"🍽️ <b>{html.escape(str(meal_name))}</b>\n\n"
+    if is_plan:
+        response = f"📋 <b>План: {html.escape(str(meal_name))}</b>\n\n"
+    else:
+        response = f"🍽️ <b>{html.escape(str(meal_name))}</b>\n\n"
     for item in meal_items:
         w_str = f"{item['weight_g']}г" if item.get("weight_g") else "?"
         cal = item.get("calories", 0)
@@ -1731,13 +1742,24 @@ async def handle_meal_confirmation(callback: CallbackQuery, callback_data: MealC
                 _db.close()
             budget = format_budget_line(telegram_user_id, for_date=meal_date, show_bar=_show_bar)
 
+            is_plan = bool(user_state.data.get("is_plan"))
+            confirm_first_line = (
+                f"📋 <b>План: {meal_name}</b> · {meal_kcal:.0f} ккал\n"
+                if is_plan
+                else f"✅ <b>{meal_name}</b> · {meal_kcal:.0f} ккал\n"
+            )
             confirm_text = (
-                f"✅ <b>{meal_name}</b> · {meal_kcal:.0f} ккал\n"
+                f"{confirm_first_line}"
                 f"Б {totals.get('protein', 0):.0f}г · "
                 f"Ж {totals.get('fats', 0):.0f}г · "
                 f"У {totals.get('carbs', 0):.0f}г"
                 f"{budget}"
             )
+            if is_plan:
+                confirm_text += (
+                    "\n<i>Считаю как съеденное. Когда доешь или что-то останется — "
+                    "напиши мне, например «минус 2 яйца» или «съела всё».</i>"
+                )
             await safe_edit_text(callback.message, confirm_text, parse_mode="HTML")
 
             await _maybe_record_first_food(telegram_user_id, callback.message)

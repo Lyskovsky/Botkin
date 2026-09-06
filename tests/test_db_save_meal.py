@@ -25,6 +25,37 @@ def test_returns_created_nutrition_log_id(test_db):
     assert row.meal_name == "Завтрак"
 
 
+def test_saves_status_plan_when_is_plan_true(test_db):
+    """#407: meal_data с is_plan=True должен сохраняться со status='plan'."""
+    meal_data = {
+        "meal_items": [{"product": "Творог", "weight_g": 200, "calories": 200}],
+        "meal_totals": {"calories": 200, "protein": 20, "fats": 5, "carbs": 5},
+        "meal_time": "09:00",
+        "is_plan": True,
+    }
+
+    with patch("helpers.db_save.SessionLocal", return_value=test_db):
+        result = save_meal_to_db(meal_data, "Завтрак", user_id=42)
+
+    row = test_db.query(NutritionLog).filter(NutritionLog.id == result).one()
+    assert row.status == "plan"
+
+
+def test_saves_status_eaten_when_is_plan_absent(test_db):
+    """Без is_plan (обычный флоу) status остаётся 'eaten' по умолчанию."""
+    meal_data = {
+        "meal_items": [{"product": "Банан", "weight_g": 120, "calories": 110}],
+        "meal_totals": {"calories": 110, "protein": 1, "fats": 0, "carbs": 28},
+        "meal_time": "09:00",
+    }
+
+    with patch("helpers.db_save.SessionLocal", return_value=test_db):
+        result = save_meal_to_db(meal_data, "Завтрак", user_id=42)
+
+    row = test_db.query(NutritionLog).filter(NutritionLog.id == result).one()
+    assert row.status == "eaten"
+
+
 def test_returns_none_on_db_error():
     with patch("helpers.db_save.SessionLocal", side_effect=RuntimeError("db down")):
         result = save_meal_to_db({"meal_items": [], "meal_totals": {}}, "Обед", user_id=1)

@@ -575,6 +575,13 @@ async def handle_text_message(message: Message, user_id: int, state: FSMContext)
         text = text[1:].lstrip(" :")
         debug_logger.info(f"🧪 E2E mode detected for user {user_id}")
 
+    # #407: префикс «план:» / «на день:» / «планирую …» — запись вносится
+    # авансом, факт сводится позже. Снимаем ДО извлечения даты и LLM-роутера,
+    # чтобы "план: вчера ужин ..." парсился как обычно, без слова "план".
+    from core.food.plan_prefix import strip_plan_prefix
+
+    text, is_plan = strip_plan_prefix(text)
+
     debug_logger.info(f"🚀 START Processing message from {user_id}: {text[:50]}...")
 
     # Индикатор "печатает..." крутится через TypingMiddleware.
@@ -1204,6 +1211,7 @@ async def handle_text_message(message: Message, user_id: int, state: FSMContext)
                     meal_time=_temporal_phrase_to_time(text) or datetime.now(user_tz).strftime("%H:%M"),
                     meal_name=meal_name,
                     date=custom_date,
+                    is_plan=is_plan or None,
                 ),
             )
             state_manager.set_state(user_id, new_state)
@@ -1212,7 +1220,10 @@ async def handle_text_message(message: Message, user_id: int, state: FSMContext)
             supp_list = "\n".join([f"• {html.escape(str(s))}" for s in normalized_supp])
             supp_status = "✅" if supp_saved else "⚠️"
             response = f"💊 {supp_status} <b>Добавки:</b>\n{supp_list}\n\n"
-            response += f"🍽️ <b>{html.escape(str(meal_name))}</b>\n"
+            if is_plan:
+                response += f"📋 <b>План: {html.escape(str(meal_name))}</b>\n"
+            else:
+                response += f"🍽️ <b>{html.escape(str(meal_name))}</b>\n"
             if custom_date:
                 response += f"📅 на {custom_date}\n"
             for item in meal_items:
@@ -1418,6 +1429,7 @@ async def handle_text_message(message: Message, user_id: int, state: FSMContext)
                     date=custom_date,
                     # #255: пользователь дал точные КБЖУ с этикетки текстом
                     product_label=data.get("product_label"),
+                    is_plan=is_plan or None,
                 ),
             )
             state_manager.set_state(user_id, new_state)
@@ -1426,7 +1438,9 @@ async def handle_text_message(message: Message, user_id: int, state: FSMContext)
             # Escape meal_name!
             safe_meal_name = html.escape(str(meal_name))
 
-            header = f"🍽️ <b>{safe_meal_name}</b>"
+            meal_emoji = "📋" if is_plan else "🍽️"
+            meal_label = "План: " if is_plan else ""
+            header = f"{meal_emoji} <b>{meal_label}{safe_meal_name}</b>"
             if custom_date:
                 # Парсим дату и форматируем красиво
                 try:
@@ -1436,10 +1450,10 @@ async def handle_text_message(message: Message, user_id: int, state: FSMContext)
                     weekdays_ru = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"]
                     weekday = weekdays_ru[date_obj.weekday()]
                     formatted_date = date_obj.strftime("%d.%m.%Y")
-                    header = f"🍽️ <b>{safe_meal_name} в {weekday} {formatted_date}</b>"
+                    header = f"{meal_emoji} <b>{meal_label}{safe_meal_name} в {weekday} {formatted_date}</b>"
                 except:
                     # Если не удалось распарсить, просто показываем дату
-                    header = f"🍽️ <b>{safe_meal_name} ({custom_date})</b>"
+                    header = f"{meal_emoji} <b>{meal_label}{safe_meal_name} ({custom_date})</b>"
 
             # Формируем ответ
             response = f"{header}\n\n"
@@ -1469,7 +1483,8 @@ async def handle_text_message(message: Message, user_id: int, state: FSMContext)
 
             builder = InlineKeyboardBuilder()
             builder.button(
-                text="✅ Сохранить", callback_data=MealConfirmationCallback(action="save", meal_type="regular").pack()
+                text="✅ Сохранить план" if is_plan else "✅ Сохранить",
+                callback_data=MealConfirmationCallback(action="save", meal_type="regular").pack(),
             )
             builder.button(
                 text="❌ Отмена", callback_data=MealConfirmationCallback(action="cancel", meal_type="regular").pack()
