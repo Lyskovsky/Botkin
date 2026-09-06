@@ -74,7 +74,7 @@ def test_compute_upload_plan_no_upload_when_only_corrections_present_on_server(t
         "blood_tests": {"values": {"ldl": 3.1}},
         "agent_corrections": {"note": {"value": "x", "reason": "y", "updated_at": "2026-09-01T00:00:00Z"}},
     }
-    monkeypatch.setattr(sfk, "fetch_server_kb_text", lambda tid: json.dumps(server_kb))
+    monkeypatch.setattr(sfk, "fetch_server_kb_text", lambda tid: ("ok", json.dumps(server_kb)))
 
     should_upload, status, merged = sfk.compute_upload_plan(local_path, 123)
 
@@ -92,7 +92,7 @@ def test_compute_upload_plan_detects_real_content_diff(tmp_path, monkeypatch):
         "blood_tests": {"values": {"ldl": 3.1}},
         "agent_corrections": {"note": {"value": "x", "reason": "y", "updated_at": "2026-09-01T00:00:00Z"}},
     }
-    monkeypatch.setattr(sfk, "fetch_server_kb_text", lambda tid: json.dumps(server_kb))
+    monkeypatch.setattr(sfk, "fetch_server_kb_text", lambda tid: ("ok", json.dumps(server_kb)))
 
     should_upload, status, merged = sfk.compute_upload_plan(local_path, 123)
 
@@ -101,6 +101,49 @@ def test_compute_upload_plan_detects_real_content_diff(tmp_path, monkeypatch):
     assert merged["blood_tests"]["values"]["ldl"] == 4.0
     # секция agent_corrections сервера должна была сохраниться в плане на загрузку
     assert merged["agent_corrections"]["note"]["value"] == "x"
+
+
+def test_compute_upload_plan_unreachable_never_uploads(tmp_path, monkeypatch):
+    """ssh упал (rc=255, пустой stdout) — не должно трактоваться как 'файла нет'."""
+    local_kb = {"blood_tests": {"values": {"ldl": 4.0}}}
+    local_path = tmp_path / "knowledge_base.json"
+    local_path.write_text(json.dumps(local_kb), encoding="utf-8")
+
+    monkeypatch.setattr(sfk, "fetch_server_kb_text", lambda tid: ("unreachable", ""))
+
+    should_upload, status, merged = sfk.compute_upload_plan(local_path, 123)
+
+    assert should_upload is False
+    assert status == "unreachable"
+    assert merged is None
+
+
+def test_fetch_server_kb_text_ssh_failure_is_unreachable_not_absent(monkeypatch):
+    """rc=255 (транспортная ошибка ssh) не должен давать тот же результат, что легитимное 'файла нет'."""
+
+    def fake_run(cmd, capture_output=True, text=True):
+        return _fake_ssh_result(stdout="", returncode=255)
+
+    monkeypatch.setattr(sfk.subprocess, "run", fake_run)
+
+    status, text = sfk.fetch_server_kb_text(123)
+
+    assert status == "unreachable"
+    assert text == ""
+
+
+def test_fetch_server_kb_text_sentinel_means_legitimately_absent(monkeypatch):
+    """Сентинел __KB_ABSENT__ с rc=0 — это законный случай 'файла нет', заливка разрешена."""
+
+    def fake_run(cmd, capture_output=True, text=True):
+        return _fake_ssh_result(stdout=f"{sfk.ABSENT_SENTINEL}\n", returncode=0)
+
+    monkeypatch.setattr(sfk.subprocess, "run", fake_run)
+
+    status, text = sfk.fetch_server_kb_text(123)
+
+    assert status == "absent"
+    assert text == ""
 
 
 def test_upload_uploads_merged_content_not_raw_local_file(tmp_path, monkeypatch):
@@ -141,3 +184,39 @@ def test_upload_uploads_merged_content_not_raw_local_file(tmp_path, monkeypatch)
     assert uploaded["agent_corrections"]["note"]["value"] == "x"
     # local-файл на диске не был затронут
     assert json.loads(local_path.read_text(encoding="utf-8")) == local_kb
+
+
+def test_upload_with_merged_param_skips_extra_ssh_fetch(tmp_path, monkeypatch):
+    """upload(local, tid, merged=...) не должен заново ходить в ssh за содержимым файла —
+    main() уже посчитал merged через compute_upload_plan, второй round-trip лишний
+    и на серии пользователей провоцирует бан fail2ban."""
+    local_path = tmp_path / "knowledge_base.json"
+    local_path.write_text(json.dumps({"blood_tests": {"values": {"ldl": 4.0}}}), encoding="utf-8")
+
+    merged = {
+        "blood_tests": {"values": {"ldl": 4.0}},
+        "agent_corrections": {"note": {"value": "x", "reason": "y", "updated_at": "2026-09-01T00:00:00Z"}},
+    }
+
+    ssh_commands = []
+    uploaded_files = []
+
+    def fake_run(cmd, capture_output=True, text=True):
+        if cmd[0] == "ssh":
+            ssh_commands.append(" ".join(cmd))
+            return _fake_ssh_result(stdout="")
+        if cmd[0] == "scp":
+            src = Path(cmd[-2])
+            uploaded_files.append(json.loads(src.read_text(encoding="utf-8")))
+            return _fake_ssh_result(returncode=0)
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    monkeypatch.setattr(sfk.subprocess, "run", fake_run)
+
+    ok = sfk.upload(local_path, 123, merged=merged)
+
+    assert ok is True
+    # только backup-команда должна была пойти по ssh, никакого "cat"-фетча
+    assert len(ssh_commands) == 1
+    assert "cat " not in ssh_commands[0]
+    assert uploaded_files[0]["agent_corrections"]["note"]["value"] == "x"
