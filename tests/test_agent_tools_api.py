@@ -1242,3 +1242,18 @@ def _current_mock_user(client):
     from webhook.jwt_auth import get_agent_user
 
     return client.app.dependency_overrides[get_agent_user]()
+
+
+def test_adjust_meal_items_rejects_nan_and_negative_weight(client, db_session):
+    """#407: NaN/отрицательный new_weight — 422, а не тихое удаление item."""
+    plan = _seed_meal(db_session, status="plan")
+    r = client.post(
+        "/api/agent/adjust_meal_items", json={"meal_id": plan.id, "changes": [{"idx": 0, "new_weight": -5}]}
+    )
+    assert r.status_code == 422
+    r = client.post(
+        "/api/agent/adjust_meal_items",
+        content='{"meal_id": %d, "changes": [{"idx": 0, "new_weight": NaN}]}' % plan.id,
+        headers={"Content-Type": "application/json"},
+    )
+    assert r.status_code in (400, 422)  # NaN режет сам JSON-парсер FastAPI (400) либо валидатор (422)

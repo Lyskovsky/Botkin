@@ -157,6 +157,10 @@ def dispatch_plan_close(db, token: str, dry: bool = False, now_fn=None) -> int:
                 settings.meal_reminder_last_sent = last_sent
                 sent += 1
                 changed_any = True
+                if not dry:
+                    # Коммит на каждого пользователя: rollback при ошибке следующего
+                    # не должен стирать уже проставленный дедуп-ключ (иначе повторный вопрос).
+                    db.commit()
 
         except Exception:  # noqa: BLE001 — один пользователь не должен срывать рассылку остальным
             logger.exception("plan_close: ошибка для user_id=%s, пропускаю", uid)

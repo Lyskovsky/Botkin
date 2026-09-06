@@ -9,6 +9,7 @@ Tasks 5-7 of HealthVault Sprint 1a:
   - Task 7: Read endpoints (recent_meals, kb_value, dashboard_summary, user_profile)
 """
 
+import math
 import re
 import sys
 import asyncio
@@ -20,7 +21,7 @@ from typing import Any, List, Optional
 
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
 # Ensure project root on path for database imports
@@ -256,6 +257,15 @@ class AdjustChange(BaseModel):
     idx: int
     new_weight: Optional[float] = None
     remove: bool = False
+
+    @field_validator("new_weight")
+    @classmethod
+    def _weight_finite_non_negative(cls, v: Optional[float]) -> Optional[float]:
+        if v is None:
+            return v
+        if not math.isfinite(v) or v < 0:
+            raise ValueError("new_weight must be a finite number >= 0")
+        return v
 
 
 class AdjustMealItemsRequest(BaseModel):

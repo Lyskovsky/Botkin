@@ -334,3 +334,30 @@ def test_dispatch_plan_close_one_failing_user_does_not_abort_others(test_db):
 
     assert count == 1
     assert sent_calls == [ok_uid]
+
+
+def test_dispatch_plan_close_failure_after_success_keeps_earlier_dedup(test_db):
+    """Ошибка у ПОСЛЕДУЮЩЕГО пользователя не откатывает дедуп-ключ предыдущего (per-user commit)."""
+    import scripts.server.send_reminders as send_reminders
+    from database.models import UserSettings
+
+    today = date(2026, 9, 6)
+    ok_uid, failing_uid = 895720, 895721  # ok_uid обрабатывается первым (меньший id / порядок вставки)
+    _seed_user_with_open_plan(test_db, ok_uid, today)
+    _seed_user_with_open_plan(test_db, failing_uid, today)
+    fake_now = datetime(2026, 9, 6, 21, 30)
+
+    def fake_send(token, chat_id, text, dry, reply_markup=None):
+        if chat_id == failing_uid:
+            raise RuntimeError("boom")
+        return True
+
+    with (
+        patch.object(send_reminders, "_send", side_effect=fake_send),
+        patch("core.infra.tz.get_user_tz", return_value=None),
+    ):
+        count = send_reminders.dispatch_plan_close(test_db, token="dummy", dry=False, now_fn=lambda tz: fake_now)
+
+    assert count == 1
+    settings = test_db.query(UserSettings).filter(UserSettings.user_id == ok_uid).first()
+    assert settings.meal_reminder_last_sent.get("__plan_close__") == "2026-09-06"
